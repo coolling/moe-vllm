@@ -721,7 +721,7 @@ def safetensors_weights_iterator(
                     
                     if "experts" in name.lower():
                         print(name)
-                        # continue
+                        continue
                         param = f.get_tensor(name)
                         yield name, param
                     else:

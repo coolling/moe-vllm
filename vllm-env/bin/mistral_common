@@ -1,10 +1,10 @@
 #!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python
-# EASY-INSTALL-ENTRY-SCRIPT: 'mistral-common','console_scripts','mistral_common'
+# EASY-INSTALL-ENTRY-SCRIPT: 'mistral-common==1.8.8','console_scripts','mistral_common'
 import re
 import sys
 
 # for compatibility with easy_install; see #2198
-__requires__ = 'mistral-common'
+__requires__ = 'mistral-common==1.8.8'
 
 try:
     from importlib.metadata import distribution
@@ -30,4 +30,4 @@ globals().setdefault('load_entry_point', importlib_load_entry_point)
 
 if __name__ == '__main__':
     sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0])
-    sys.exit(load_entry_point('mistral-common', 'console_scripts', 'mistral_common')())
+    sys.exit(load_entry_point('mistral-common==1.8.8', 'console_scripts', 'mistral_common')())

@@ -1,10 +1,10 @@
 #!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python
-# EASY-INSTALL-ENTRY-SCRIPT: 'websockets','console_scripts','websockets'
+# EASY-INSTALL-ENTRY-SCRIPT: 'websockets==16.0','console_scripts','websockets'
 import re
 import sys
 
 # for compatibility with easy_install; see #2198
-__requires__ = 'websockets'
+__requires__ = 'websockets==16.0'
 
 try:
     from importlib.metadata import distribution
@@ -30,4 +30,4 @@ globals().setdefault('load_entry_point', importlib_load_entry_point)
 
 if __name__ == '__main__':
     sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0])
-    sys.exit(load_entry_point('websockets', 'console_scripts', 'websockets')())
+    sys.exit(load_entry_point('websockets==16.0', 'console_scripts', 'websockets')())

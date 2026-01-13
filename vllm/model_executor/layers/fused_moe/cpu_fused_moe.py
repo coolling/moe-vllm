@@ -428,18 +428,16 @@ def cpu_fused_moe_torch(
             continue
         if(_EXPERT_WEIGHT_LOADED[str(layer_id)][str(i)]):
             print("coolling: expert",i,"loaded")
-        # else:
+        else:
             #coolling:todo
             print("coolling: expert",i,"no loaded")
             target_weight_w1="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(1)+".weight"
             target_weight_w2="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(2)+".weight"
             target_weight_w3="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(3)+".weight"
-            w1_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w1)
-            w2_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w2)
-            w3_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w3)
-            w13_weight_t = torch.cat([w1_weight_t, w3_weight_t], dim=0)
-            print(tensors_equal(w2_weight_t,layer.w2_weight[i]))
-            print(tensors_equal(w13_weight_t,layer.w13_weight[i]))
+            layer.w2_weight[i]=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w2)
+            layer.w13_weight[i]= torch.cat([load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w1), load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w3)], dim=0)
+            # print(tensors_equal(w2_weight_t,layer.w2_weight[i]))
+            # print(tensors_equal(w13_weight_t,layer.w13_weight[i]))
             # print(is_all_zero(layer.w13_weight[i]) and is_all_zero(layer.w2_weight[i]))
             
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
