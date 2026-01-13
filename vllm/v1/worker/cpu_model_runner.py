@@ -43,6 +43,7 @@ class CPUModelRunner(GPUModelRunner):
                 v.gpu = v.cpu
 
         for k, v in vars(self.input_batch).items():
+           
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
                 replace_tensor(self.input_batch, k, k[:-11])
 
@@ -53,7 +54,7 @@ class CPUModelRunner(GPUModelRunner):
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        print(self.vllm_config)
+        # print(self.vllm_config)
         self.model = get_model(vllm_config=self.vllm_config)
 
         if self.lora_config:

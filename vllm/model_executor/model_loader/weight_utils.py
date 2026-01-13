@@ -653,7 +653,16 @@ def np_cache_weights_iterator(
             param = np.load(f)
         yield name, torch.from_numpy(param)
 
-
+def load_expert_weight(
+    hf_weights_files: list[str],
+    weight_name:str="",):
+    for st_file in hf_weights_files:
+        try:
+            with safe_open(st_file, framework="pt") as f:
+                return f.get_tensor(weight_name)                  
+        except:
+            print("none")
+            return None
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -691,7 +700,7 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    print(name)
+                    print("@",name)
                     state_dict[name] = f.get_tensor(name)
 
                 # update with leftover tensor data from previous iteration, if any
@@ -706,11 +715,19 @@ def safetensors_weights_iterator(
                 )
             yield from unflattened_state_dict.items()
         else:
+            #coolling:load model
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    print(name)
-                    param = f.get_tensor(name)
-                    yield name, param
+                    
+                    if "experts" in name.lower():
+                        print(name)
+                        # continue
+                        param = f.get_tensor(name)
+                        yield name, param
+                    else:
+                        # print("!")
+                        param = f.get_tensor(name)
+                        yield name, param
 
 
 def multi_thread_safetensors_weights_iterator(

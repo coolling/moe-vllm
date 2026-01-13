@@ -237,6 +237,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
                     layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    # print("asdfghjk!!!!!!!!!!!")
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
@@ -347,7 +348,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or layer.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
-
+        # print("forward_cpu")
+        # print("Using:", type(layer.cpu_fused_moe))
+        # if hasattr(layer.cpu_fused_moe, 'forward_method'):
+        #     print("Forward method:", layer.cpu_fused_moe.forward_method.__name__)
         return layer.cpu_fused_moe(
             layer,
             x,
@@ -380,6 +384,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or layer.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
+        
         return layer.ipex_fusion(
             x,
             layer.use_grouped_topk,

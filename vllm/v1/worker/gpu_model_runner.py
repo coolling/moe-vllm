@@ -2896,6 +2896,7 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
+        print("coolling:_model_forward")
         return self.model(
             input_ids=input_ids,
             positions=positions,

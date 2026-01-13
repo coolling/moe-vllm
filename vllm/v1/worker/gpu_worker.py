@@ -574,7 +574,7 @@ class Worker(WorkerBase):
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
         parallel_config = self.vllm_config.parallel_config
-
+        print("coolling:execute_model()")
         if (
             parallel_config.pipeline_parallel_size > 1
             and compilation_config.pass_config.enable_sp

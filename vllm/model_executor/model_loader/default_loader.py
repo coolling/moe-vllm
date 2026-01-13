@@ -33,7 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
-
+GLOBAL_HF_WEIGHTS_FILE: list[str] = []
 
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
@@ -146,7 +146,7 @@ class DefaultModelLoader(BaseModelLoader):
             )
         else:
             hf_folder = model_name_or_path
-
+        global GLOBAL_HF_WEIGHTS_FILE
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
@@ -154,7 +154,8 @@ class DefaultModelLoader(BaseModelLoader):
                 if pattern == "*.safetensors":
                     use_safetensors = True
                 break
-
+        GLOBAL_HF_WEIGHTS_FILE=hf_weights_files
+        print(GLOBAL_HF_WEIGHTS_FILE)
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
@@ -273,7 +274,7 @@ class DefaultModelLoader(BaseModelLoader):
             fall_back_to_pt=True,
             allow_patterns_overrides=None,
         )
-
+    #coolling:delete load check
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
@@ -286,6 +287,8 @@ class DefaultModelLoader(BaseModelLoader):
 
         weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        # print("weights_to_load",weights_to_load)
+        # print("load_weights",loaded_weights)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
@@ -295,10 +298,10 @@ class DefaultModelLoader(BaseModelLoader):
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
-            weights_not_loaded = weights_to_load - loaded_weights
-            if weights_not_loaded:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
-                )
+        # if model_config.quantization is None and loaded_weights is not None:
+        #     weights_not_loaded = weights_to_load - loaded_weights
+        #     if weights_not_loaded:
+        #         raise ValueError(
+        #             "Following weights were not initialized from "
+        #             f"checkpoint: {weights_not_loaded}"
+        #         )

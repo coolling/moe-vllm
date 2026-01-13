@@ -575,6 +575,7 @@ class FusedMoE(CustomOp):
             if quant_method is None:
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             assert isinstance(quant_method, FusedMoEMethodBase)
+            
             return quant_method
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -1629,7 +1630,7 @@ class FusedMoE(CustomOp):
             topk_ids = topk_ids.to(dtype=indices_type)
 
         assert topk_ids.dtype == indices_type or indices_type is None
-
+        print(topk_weights, topk_ids)
         return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
@@ -1781,6 +1782,7 @@ class FusedMoE(CustomOp):
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
             )
+            
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
@@ -1846,6 +1848,7 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # print("coolling:forward_impl")
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config_init()
@@ -1872,6 +1875,7 @@ class FusedMoE(CustomOp):
             router_logits, _ = self.gate(hidden_states)
 
         if use_chunked_impl:
+            print("1")
             return self.forward_impl_chunked(
                 hidden_states, router_logits, has_separate_shared_experts
             )
@@ -1917,6 +1921,7 @@ class FusedMoE(CustomOp):
                     self.is_sequence_parallel,
                     extra_tensors=extra_tensors,
                 )
+                print("coolling:dispatch_res",dispatch_res)
                 if extra_tensors is not None:
                     hidden_states_combined, router_logits, extra_tensors_combined = (
                         dispatch_res
@@ -1955,6 +1960,7 @@ class FusedMoE(CustomOp):
                 else hidden_states,
                 router_logits=router_logits,
             )
+            # print("coolling:quant_method",self.quant_method.__class__.__name__)
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
 from collections.abc import Callable
-
+from collections import defaultdict
 import torch
 from torch.nn import functional as F
 
@@ -11,14 +11,22 @@ from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
-
+from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
+from vllm.model_executor.model_loader.weight_utils import load_expert_weight
 _CPU_MOE_LAYER_CACHE = {}
+_EXPERT_WEIGHT_LOADED = defaultdict(dict)
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
     "swigluoai": SwigluOAIAndMul(),
 }
-
-
+def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
+    # 检查形状是否相同
+    if a.shape != b.shape:
+        return False
+    # 逐元素比较，全部为 True 则返回 True
+    return torch.equal(a, b)  # 最高效！
+def is_all_zero(tensor):
+    return torch.allclose(tensor, torch.zeros_like(tensor))
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -179,11 +187,13 @@ class SGLFusedMOE:
             None,
             True,
         )
+        # print(topk_weights, topk_ids)
         return x
 
 
 class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
+        # print("coolling:CPUFusedMOE")
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
         if use_grouped_gemm:
@@ -228,6 +238,7 @@ class CPUFusedMOE:
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
         )
+        # print(topk_weights, topk_ids)
 
         return self.forward_method(
             layer,
@@ -277,7 +288,7 @@ class CPUFusedMOE:
         replace_parameter(layer, "w13_weight", new_w13)
         new_w2 = cpu_prepack_moe_weight(layer.w2_weight, self.isa)
         replace_parameter(layer, "w2_weight", new_w2)
-
+    #coolling: load state
     def init_moe_torch(
         self,
         layer: torch.nn.Module,
@@ -291,10 +302,16 @@ class CPUFusedMOE:
         layer.down_linear = []
 
         for i in range(num_experts):
+            weight_loaded=True
             layer_w13_weight = layer.w13_weight[i]
+            # print(i,layer_w13_weight)
             layer_w13_bias = layer.w13_bias[i] if has_w13_bias else None
             layer_w2_weight = layer.w2_weight[i]
             layer_w2_bias = layer.w2_bias[i] if has_w2_bias else None
+            if is_all_zero(layer_w13_weight) and is_all_zero(layer_w2_weight):
+                weight_loaded=False
+            _EXPERT_WEIGHT_LOADED[str(id(layer))][str(i)]=weight_loaded
+                
             if use_onednn_mm:
                 gate_up_handle = ops.create_onednn_mm(layer_w13_weight.t(), 32)
                 layer.gate_up_linear.append(
@@ -319,7 +336,7 @@ class CPUFusedMOE:
         if use_onednn_mm:  # remove weight
             layer.w13_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-
+        # print(_EXPERT_WEIGHT_LOADED)
         _CPU_MOE_LAYER_CACHE[id(layer)] = weakref.ref(layer)
 
     def forward_grouped_gemm(
@@ -331,6 +348,7 @@ class CPUFusedMOE:
         activation: str,
         global_num_experts: int = -1,
     ) -> torch.Tensor:
+        
         output = cpu_fused_moe(
             input,
             layer.w13_weight,
@@ -355,6 +373,8 @@ class CPUFusedMOE:
     ) -> torch.Tensor:
         output = torch.empty_like(input)
         layer_id = id(layer)
+        # print("forward_torch")
+        
         torch.ops.vllm.cpu_fused_moe_torch(
             layer_id,
             output,
@@ -367,7 +387,7 @@ class CPUFusedMOE:
 
         return output
 
-
+#coolling: expert compute
 def cpu_fused_moe_torch(
     layer_id: int,
     output: torch.Tensor,
@@ -377,16 +397,24 @@ def cpu_fused_moe_torch(
     activation: str,
     global_num_experts: int = -1,
 ) -> None:
+    # 获取 layer_id 在插入顺序中的 0-based 排名
+    keys_in_order = list(_CPU_MOE_LAYER_CACHE.keys())
+    rank = keys_in_order.index(layer_id)  # 0-based 
+    print("=== cpu_fused_moe_torch 参数详情 ===")
+    print(f"layer_id: {layer_id}")
+    print(f"rank: {rank}")
+    print(f"global_num_experts: {global_num_experts}")
+    # 可选：打印部分数值（避免太多）
+    print(f"topk_ids (first 10): {topk_ids.flatten()[:10].tolist()}")
+    print("====================================\n")
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
-
-    # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
+    # print(layer)
+    # print(GLOBAL_HF_WEIGHTS_FILE)
     len_experts = global_num_experts
-
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
     tokens_per_expert = cnts.sum(dim=0)
     idxs = topk_ids.view(-1).argsort()
-
     sorted_tokens = input[idxs // topk_ids.shape[1]]
     tokens_per_expert = tokens_per_expert.cpu().numpy()
 
@@ -394,9 +422,26 @@ def cpu_fused_moe_torch(
     start_idx = 0
 
     for i, num_tokens in enumerate(tokens_per_expert):
+        
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
             continue
+        if(_EXPERT_WEIGHT_LOADED[str(layer_id)][str(i)]):
+            print("coolling: expert",i,"loaded")
+        # else:
+            #coolling:todo
+            print("coolling: expert",i,"no loaded")
+            target_weight_w1="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(1)+".weight"
+            target_weight_w2="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(2)+".weight"
+            target_weight_w3="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(3)+".weight"
+            w1_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w1)
+            w2_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w2)
+            w3_weight_t=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w3)
+            w13_weight_t = torch.cat([w1_weight_t, w3_weight_t], dim=0)
+            print(tensors_equal(w2_weight_t,layer.w2_weight[i]))
+            print(tensors_equal(w13_weight_t,layer.w13_weight[i]))
+            # print(is_all_zero(layer.w13_weight[i]) and is_all_zero(layer.w2_weight[i]))
+            
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
