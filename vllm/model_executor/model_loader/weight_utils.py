@@ -652,17 +652,92 @@ def np_cache_weights_iterator(
         with open(param_path, "rb") as f:
             param = np.load(f)
         yield name, torch.from_numpy(param)
-
+from safetensors.torch import safe_open, save_file,load_file
+import os
+import gc
+import torch
+import re
+import tempfile
+import shutil
+import fcntl
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
 def load_expert_weight(
     hf_weights_files: list[str],
     weight_name:str="",):
+    
+
+    # # 2. 清空Python/PyTorch缓存
+    # gc.collect()
+    # torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    # torch._C._emptyCUDAIPCCache() if torch.cuda.is_available() else None
+
     for st_file in hf_weights_files:
         try:
-            with safe_open(st_file, framework="pt") as f:
-                return f.get_tensor(weight_name)                  
-        except:
-            print("none")
-            return None
+            # === 路径拼接 ===
+            st_file_dir = os.path.dirname(st_file)
+            experts_dir = os.path.join(st_file_dir, "experts")
+            safe_name = sanitize_filename(weight_name)
+            target_file = os.path.join(experts_dir, f"{safe_name}.safetensors")
+
+            if not os.path.exists(target_file):
+                print(f"文件不存在：{target_file}")
+                continue
+
+            # === 核心：临时文件 + 排他锁（彻底绕缓存） ===
+            # 3. 创建唯一临时文件（每次生成新文件，无缓存）
+            tmp_fd, tmp_file_path = tempfile.mkstemp(suffix=".safetensors")
+            os.close(tmp_fd)  # 关闭临时文件描述符，避免占用
+
+            # 4. 以「无缓存模式」复制原文件到临时文件
+            # 打开原文件：加排他锁，防止其他进程修改
+            with open(target_file, "rb") as src_f:
+                fcntl.flock(src_f.fileno(), fcntl.LOCK_EX)  # 排他锁
+                # 打开临时文件：使用O_SYNC（写操作直接刷磁盘，无缓存）
+                with open(tmp_file_path, "wb") as dst_f:
+                    os.fdatasync(dst_f.fileno())  # 禁用写缓存
+                    shutil.copyfileobj(src_f, dst_f, length=4096)  # 4KB块复制，对齐磁盘
+                fcntl.flock(src_f.fileno(), fcntl.LOCK_UN)  # 释放锁
+
+            # 5. 禁用safetensors所有缓存，读取临时文件
+            # os.environ["SAFETENSORS_DISABLE_MEMORY_MAPPING"] = "1"
+            # os.environ["SAFETENSORS_CACHE_DISABLE"] = "1"
+            # os.environ["SAFETENSORS_FORCE_DISK_READ"] = "1"
+            
+            # # 读取前再次清空临时文件的缓存（针对单个文件）
+            # os.system(f"posix_fadvise {tmp_file_path} 0 0 POSIX_FADV_DONTNEED 2>/dev/null")
+            
+            tensor_dict = load_file(tmp_file_path, device="cpu")
+            tensor = tensor_dict.get(weight_name, None)
+
+            # 6. 立即删除临时文件（用完即删，无残留）
+            os.unlink(tmp_file_path)
+
+            if tensor is None:
+                print(f"文件内无目标权重：{list(tensor_dict.keys())}")
+                continue
+
+            # === 形状验证+兜底拆分 ===
+            # print(f"=== 无缓存加载结果 ===")
+            # print(f"权重名：{weight_name}")
+            # print(f"原始形状：{tensor.shape}")
+            
+            
+            # 确保张量独立，无缓存关联
+            tensor = tensor.cpu().clone().detach()
+            del tensor_dict
+            gc.collect()
+
+            return tensor
+
+        except Exception as e:
+            print(f"无缓存读取失败：{e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    print(f"权重 {weight_name} 未找到")
+    return None
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -716,14 +791,42 @@ def safetensors_weights_iterator(
             yield from unflattened_state_dict.items()
         else:
             #coolling:load model
+            st_file_dir = os.path.dirname(st_file)
+            save_expert_dir = os.path.join(st_file_dir, "experts")
+            os.makedirs(save_expert_dir, exist_ok=True)
+            base_filename = os.path.basename(st_file).replace(".safetensors", "")
+
             with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():  # noqa: SIM118
-                    
+                for name in f.keys():
                     if "experts" in name.lower():
-                        print(name)
-                        continue
-                        param = f.get_tensor(name)
-                        yield name, param
+                        # ========== 核心修改：拆分拼接张量 ==========
+                        # 1. 读取原始拼接张量
+                        full_tensor = f.get_tensor(name)
+                        print(f"原始拼接张量形状：{name} → {full_tensor.shape}")
+                        
+                        
+
+                        # ========== 保存拆分后的张量 ==========
+                        # 生成唯一文件名
+                        safe_name = sanitize_filename(name)
+                        save_path = os.path.join(
+                            save_expert_dir,
+                            f"{safe_name}.safetensors"
+                        )
+
+                        # 防覆盖：文件已存在则删除后重新保存
+                        if os.path.exists(save_path):
+                            os.remove(save_path)
+                            print(f"删除旧文件：{save_path}")
+
+                        # 保存拆分后的单个专家张量
+                        save_file({name: full_tensor}, save_path)
+                        print(f"✅ 保存成功：{save_path} → 形状{full_tensor.shape}")
+
+                        # ========== 验证保存的文件 ==========
+                        # verify_dict = load_file(save_path, device="cpu")
+                        # verify_tensor = verify_dict[name]
+                        # print(f"✅ 验证保存文件：形状{verify_tensor.shape}")
                     else:
                         # print("!")
                         param = f.get_tensor(name)

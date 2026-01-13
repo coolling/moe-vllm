@@ -2,6 +2,7 @@
 import os
 import requests
 import json
+import time  # 👈 新增：用于计时
 
 # === 强制清除所有代理相关环境变量 ===
 proxy_keys = [
@@ -19,10 +20,13 @@ url = "http://localhost:8000/v1/chat/completions"
 payload = {
     "model": "/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 100,
+    "max_tokens": 10,
     "temperature": 0,
     "chat_template": "{% for message in messages %}{% if message['role'] == 'user' %}<s>[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"
 }
+
+# ====== ⏱️ 开始计时 ======
+start_time = time.perf_counter()
 
 try:
     # 关键：显式禁用代理
@@ -30,13 +34,22 @@ try:
         url,
         json=payload,
         timeout=3000,
-        proxies={"http": None, "https": None}  # 👈 强制 bypass 代理
+        proxies={"http": None, "https": None}
     )
     response.raise_for_status()
-    print(json.dumps(response.json(), indent=2, ensure_ascii=False))
+    
+    # ====== ⏱️ 结束计时 ======
+    elapsed = time.perf_counter() - start_time
+    
+    result = response.json()
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    
+    # ====== 🕒 打印耗时 ======
+    print(f"\n✅ 总耗时: {elapsed:.3f} 秒")
 
 except requests.exceptions.RequestException as e:
-    print("❌ 请求失败:", e)
+    elapsed = time.perf_counter() - start_time
+    print(f"\n❌ 请求失败 (耗时 {elapsed:.3f} 秒):", e)
     if e.response is not None:
         print("状态码:", e.response.status_code)
         print("响应:", repr(e.response.text))

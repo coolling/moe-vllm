@@ -140,16 +140,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             w13_up_dim = intermediate_size_per_partition
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
+        w13_weight = torch.empty(
                 num_experts,
                 w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
+            )
+        layer.register_buffer("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(
@@ -159,16 +156,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
+        w2_weight = torch.empty(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
+            )
+        layer.register_buffer("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
         if self.moe.has_bias:
             w2_bias = torch.nn.Parameter(
