@@ -20,7 +20,7 @@ url = "http://localhost:8000/v1/chat/completions"
 payload = {
     "model": "/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 5,
+    "max_tokens": 50,
     "temperature": 0,
     "chat_template": "{% for message in messages %}{% if message['role'] == 'user' %}<s>[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"
 }
