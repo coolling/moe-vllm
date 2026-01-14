@@ -30,7 +30,23 @@ def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     return torch.equal(a, b)  # 最高效！
 def is_all_zero(tensor):
     return torch.allclose(tensor, torch.zeros_like(tensor))
+import ctypes
 
+def fast_copy(dst: torch.Tensor, src: torch.Tensor):
+    """使用ctypes进行快速内存复制"""
+    # 确保张量连续
+    if not dst.is_contiguous():
+        dst = dst.contiguous()
+    if not src.is_contiguous():
+        src = src.contiguous()
+    
+    # 获取内存指针和大小
+    dst_ptr = dst.data_ptr()
+    src_ptr = src.data_ptr()
+    nbytes = dst.numel() * dst.element_size()
+    
+    # 使用memmove进行内存复制
+    ctypes.memmove(dst_ptr, src_ptr, nbytes)
 class ExpertWeightManager:
     def __init__(
         self,
@@ -89,20 +105,22 @@ class ExpertWeightManager:
         """将单个 expert 的权重加载到 buffer 的对应位置"""
         rank = layer_id  # 假设 layer_id == 推理顺序中的 rank（需与注册顺序一致）
 
-        w1_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w1.weight"
+        w13_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w13.weight"
         w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
-        w3_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w3.weight"
         start = time.time()
         # 加载 w2
-        w2_buf[expert_id] = load_expert_weight(self.weight_file, w2_key)
+        w2_t=load_expert_weight(self.weight_file, w2_key)
+        
+        w13_t=load_expert_weight(self.weight_file, w13_key)
         elapsed_ms = (time.time() - start) * 1000
-        # print(f"[DEBUG] Loaded layer={layer_id} expert={expert_id} in {elapsed_ms:.2f} ms")
-        
-        
-        
-        # 加载 w1 + w3 → 拼接为 w13
-        w13_buf[expert_id]= torch.cat([load_expert_weight(self.weight_file, w1_key), load_expert_weight(self.weight_file, w3_key)], dim=0)
-        
+        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
+        start = time.time()
+        # w2_buf[expert_id].copy_(w2_t)
+        # w13_buf[expert_id].copy_(w13_t)
+        fast_copy(w2_buf[expert_id], w2_t)
+        fast_copy(w13_buf[expert_id], w13_t)
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
 
         self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
