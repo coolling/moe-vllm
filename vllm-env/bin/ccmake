@@ -1,0 +1,7 @@
+#!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python3
+import sys
+from cmake import ccmake
+if __name__ == '__main__':
+    if sys.argv[0].endswith('.exe'):
+        sys.argv[0] = sys.argv[0][:-4]
+    sys.exit(ccmake())
