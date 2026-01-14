@@ -6,6 +6,7 @@ from collections import defaultdict
 import torch
 from torch.nn import functional as F
 import time
+from collections import defaultdict, deque
 import threading
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
@@ -34,50 +35,163 @@ class ExpertWeightManager:
     def __init__(
         self,
         num_experts: int,
-        w13,
-        w2,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        max_size: int = 2,  # 队列最大容量（预加载层数）
     ):
-        self.global_w2_tensor = torch.empty_like(w2)
-        self.global_w13_tensor = torch.empty_like(w13)
-        self._EXPERT_WEIGHT_LOADED = defaultdict(dict)
         self.num_experts = num_experts
         self.weight_file = GLOBAL_HF_WEIGHTS_FILE
-        self.current_rank=0
-    
-    def set_current_rank(self,rank):
-        self.rank=rank
-    def is_loaded(self, layer_id,expert_id: int) -> bool:
-
-        return self._EXPERT_WEIGHT_LOADED[str(layer_id)][str(expert_id)]
-    def get_w13_slice(self, expert_id: int) -> torch.Tensor:
-        return self.w13_buffer[expert_id]
-    def get_w2_slice(self, expert_id: int) -> torch.Tensor:
-        return self.w2_buffer[expert_id]
-    def set_load_state(self, layer_id,expert_id,state):
-        self._EXPERT_WEIGHT_LOADED[str(layer_id)][str(expert_id)]=state
         
-    def unload_expert(self, layer_id,expert_id: int) -> bool:
+        # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
+        self.global_w13_tensor = torch.empty_like(w13)
+        print("init",self.global_w13_tensor.data_ptr())
+        self.global_w2_tensor = torch.empty_like(w2)
 
-            if not self.is_loaded(layer_id,expert_id):
-                return # 已经是未加载状态
-            # 清零对应 slice
-            self.global_w2_tensor[expert_id].zero_()
-            self.global_w13_tensor[expert_id].zero_()
-            # 更新状态
-            self.set_load_state(layer_id,expert_id,False)
-    def clear_layer(self,layer_id):
-        self.global_w2_tensor.zero_()
-        self.global_w13_tensor.zero_()
-        for i in range(self.num_experts):
-            self.set_load_state(layer_id,i,False)
-    
-    def load_weight(self,layer_id,rank,expert_id):
-        target_weight_w1="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(1)+".weight"
-        target_weight_w2="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(2)+".weight"
-        target_weight_w3="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(3)+".weight"
-        self.global_w2_tensor[expert_id]=load_expert_weight(self.weight_file,target_weight_w2)
-        self.global_w13_tensor[expert_id]= torch.cat([load_expert_weight(self.weight_file,target_weight_w1), load_expert_weight(self.weight_file,target_weight_w3)], dim=0)
-        self.set_load_state(layer_id,expert_id,True)
+        # 加载状态跟踪（可选，用于调试）
+        self._EXPERT_WEIGHT_LOADED = defaultdict(dict)
+
+        # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
+        self.buffer_pool = []
+        for _ in range(max_size):
+            w2_buf = torch.empty_like(w2)
+            w13_buf = torch.empty_like(w13)
+            self.buffer_pool.append((w2_buf, w13_buf))
+
+        # 生产者-消费者队列：每个元素为 (layer_id, w2_buf, w13_buf)
+        self.queue = deque()  # 使用 deque 更高效
+        self.max_size = max_size
+
+        # 线程同步原语
+        self.lock = threading.Lock()
+        self.not_full = threading.Condition(self.lock)   # 队列未满
+        self.not_empty = threading.Condition(self.lock)  # 队列非空
+
+        # 控制加载顺序
+        self.layer_id_to_load = 0  # 下一个要加载的 layer_id（按注册顺序）
+        self.total_layers = 0      # 由外部设置（或动态探测）
+
+        # 启动后台生产者线程
+        self._shutdown = threading.Event()
+        self.producer_thread = threading.Thread(
+            target=self._producer_worker,
+            daemon=True,
+            name="MoEWeightProducer"
+        )
+        self.producer_thread.start()
+
+    def set_total_layers(self, total_layers: int):
+        """由外部调用，告知总共有多少 MoE 层（必须在推理开始前设置）"""
+        self.total_layers = total_layers
+
+    def _load_expert_into_buffer(self, layer_id: int, expert_id: int, w13_buf: torch.Tensor, w2_buf: torch.Tensor):
+        import time
+        
+        """将单个 expert 的权重加载到 buffer 的对应位置"""
+        rank = layer_id  # 假设 layer_id == 推理顺序中的 rank（需与注册顺序一致）
+
+        w1_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w1.weight"
+        w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
+        w3_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w3.weight"
+        start = time.time()
+        # 加载 w2
+        w2_buf[expert_id] = load_expert_weight(self.weight_file, w2_key)
+        elapsed_ms = (time.time() - start) * 1000
+        # print(f"[DEBUG] Loaded layer={layer_id} expert={expert_id} in {elapsed_ms:.2f} ms")
+        
+        
+        
+        # 加载 w1 + w3 → 拼接为 w13
+        w13_buf[expert_id]= torch.cat([load_expert_weight(self.weight_file, w1_key), load_expert_weight(self.weight_file, w3_key)], dim=0)
+        
+
+        self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
+        
+    def _producer_worker(self):
+        """后台生产者线程：循环预加载下一层权重"""
+        while not self._shutdown.is_set():
+            if self.total_layers == 0:
+                time.sleep(0.1)
+                continue
+
+            with self.lock:
+                # 等待队列未满
+                while len(self.queue) >= self.max_size and not self._shutdown.is_set():
+                    self.not_full.wait(timeout=1.0)
+
+                if self._shutdown.is_set():
+                    break
+
+                # 获取空闲 buffer
+                # if not self.buffer_pool:
+                #     print("[Producer] Warning: No free buffer available!")
+                #     time.sleep(0.05)
+                #     continue
+
+                w2_buf, w13_buf = self.buffer_pool.pop()
+                target_layer_id = self.layer_id_to_load
+
+                # 加载整层所有 experts
+                try:
+                    for eid in range(self.num_experts):
+                        self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
+                    # print(w13_buf,w2_buf)
+                except Exception as e:
+                    print(f"[Producer] Failed to load layer {target_layer_id}: {e}")
+                    # 加载失败，归还 buffer
+                    self.buffer_pool.append((w2_buf, w13_buf))
+                    time.sleep(0.5)
+                    continue
+
+                # 入队
+                self.queue.append((target_layer_id, w2_buf, w13_buf))
+                print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
+
+                # 更新下一个要加载的 layer_id（循环）
+                self.layer_id_to_load = (self.layer_id_to_load + 1) % self.total_layers
+
+                # 通知消费者
+                self.not_empty.notify_all()
+
+            # 控制加载节奏（避免 CPU 占满）
+            time.sleep(0.01)
+
+    def acquire_weights_for_layer(self,layer, expected_layer_id: int) -> bool:
+        """
+        消费者调用：等待并绑定队列头部的 buffer 到 global_tensor。
+        返回 True 表示成功，False 表示已关闭。
+        """
+        with self.not_empty:
+            while len(self.queue) == 0 and not self._shutdown.is_set():
+                self.not_empty.wait(timeout=1.0)
+
+            if self._shutdown.is_set():
+                return False
+
+            layer_id, w2_buf, w13_buf = self.queue[0]
+            if layer_id != expected_layer_id:
+                print(f"[Consumer] Expected layer {expected_layer_id}, but head is {layer_id}")
+                return False
+            
+            return True
+
+    def release_current_layer(self):
+        """消费者调用：释放当前层 buffer，归还到池中"""
+        with self.lock:
+            # if self.queue:
+                layer_id, w2_buf, w13_buf = self.queue.popleft()
+                self.buffer_pool.append((w2_buf, w13_buf))
+ 
+                self._EXPERT_WEIGHT_LOADED[layer_id].clear()
+                self.not_full.notify()  
+
+    def shutdown(self):
+        """优雅关闭"""
+        self._shutdown.set()
+        with self.not_full:
+            self.not_full.notify_all()
+        with self.not_empty:
+            self.not_empty.notify_all()
+        self.producer_thread.join(timeout=2)
         
 manager=None
 #==========================================
@@ -372,8 +486,8 @@ class CPUFusedMOE:
             layer_w2_bias = layer.w2_bias[i] if has_w2_bias else None
             if is_all_zero(layer_w13_weight) and is_all_zero(layer_w2_weight):
                 weight_loaded=False
-            manager.set_load_state(id(layer),i,weight_loaded)
-    
+            # manager.set_load_state(id(layer),i,weight_loaded)
+            
                 
             if use_onednn_mm:
                 gate_up_handle = ops.create_onednn_mm(layer_w13_weight.t(), 32)
@@ -401,6 +515,7 @@ class CPUFusedMOE:
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
 
         _CPU_MOE_LAYER_CACHE[id(layer)] = weakref.ref(layer)
+        manager.set_total_layers(len(_CPU_MOE_LAYER_CACHE))
 
 
     def forward_grouped_gemm(
@@ -469,11 +584,15 @@ def cpu_fused_moe_torch(
     # print(f"global_num_experts: {global_num_experts}")
     # # 可选：打印部分数值（避免太多）
     # print(f"topk_ids (first 10): {topk_ids.flatten()[:10].tolist()}")
-    print("====================================\n")
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
-    manager.set_current_rank(rank)
-    # print(layer)
-    # print(GLOBAL_HF_WEIGHTS_FILE)
+    print("====================================\n")
+    # print(layer.w13_weight)
+    while not manager.acquire_weights_for_layer(layer,rank):
+        print("wait load",rank)
+        time.sleep(0)
+    _, w2_buf, w13_buf=manager.queue[0]
+    print("layer.w13_weight.data_ptr()",layer.w13_weight.data_ptr())
+    print("manager.global_w13_tensor.data_ptr()",manager.global_w13_tensor.data_ptr())
     len_experts = global_num_experts
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
@@ -484,29 +603,23 @@ def cpu_fused_moe_torch(
 
     outputs = []
     start_idx = 0
-
+    
     for i, num_tokens in enumerate(tokens_per_expert):
         
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
-            manager.unload_expert(layer_id,i)
-            print("coolling: expert",i,"loaded")
             continue
-        if not manager.is_loaded(layer_id,i):
-            
-            print("coolling: expert",i,"no loaded")
-            manager.load_weight(layer_id,rank,i)
-            
-    
+        layer.w2_weight[i]=w2_buf[i]
+        layer.w13_weight[i]=w13_buf[i] 
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
         expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
-        manager.unload_expert(layer_id,i)
+        # manager.unload_expert(layer_id,i)
    
-
+    manager.release_current_layer()
     outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
     new_x = torch.empty_like(outs)
 
