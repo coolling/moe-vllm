@@ -699,10 +699,10 @@ def load_expert_weight(
                 fcntl.flock(src_f.fileno(), fcntl.LOCK_UN)  # 释放锁
 
          
-            
+            os.system(f"posix_fadvise {tmp_file_path} 0 0 POSIX_FADV_DONTNEED 2>/dev/null")
             tensor_dict = load_file(tmp_file_path, device="cpu")
             tensor = tensor_dict.get(weight_name, None)
-
+            os.unlink(tmp_file_path)
 
             if tensor is None:
                 print(f"文件内无目标权重：{list(tensor_dict.keys())}")
