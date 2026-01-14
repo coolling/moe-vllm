@@ -6,6 +6,7 @@ from collections import defaultdict
 import torch
 from torch.nn import functional as F
 import time
+import threading
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
@@ -14,13 +15,12 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
 from vllm.model_executor.model_loader.weight_utils import load_expert_weight
 _CPU_MOE_LAYER_CACHE = {}
-_EXPERT_WEIGHT_LOADED = defaultdict(dict)
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
     "swigluoai": SwigluOAIAndMul(),
 }
-global_w2_tensor = None
-global_w13_tensor = None
+# coolling ==========================
+
 def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     # 检查形状是否相同
     if a.shape != b.shape:
@@ -29,6 +29,58 @@ def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     return torch.equal(a, b)  # 最高效！
 def is_all_zero(tensor):
     return torch.allclose(tensor, torch.zeros_like(tensor))
+
+class ExpertWeightManager:
+    def __init__(
+        self,
+        num_experts: int,
+        w13,
+        w2,
+    ):
+        self.global_w2_tensor = torch.empty_like(w2)
+        self.global_w13_tensor = torch.empty_like(w13)
+        self._EXPERT_WEIGHT_LOADED = defaultdict(dict)
+        self.num_experts = num_experts
+        self.weight_file = GLOBAL_HF_WEIGHTS_FILE
+        self.current_rank=0
+    
+    def set_current_rank(self,rank):
+        self.rank=rank
+    def is_loaded(self, layer_id,expert_id: int) -> bool:
+
+        return self._EXPERT_WEIGHT_LOADED[str(layer_id)][str(expert_id)]
+    def get_w13_slice(self, expert_id: int) -> torch.Tensor:
+        return self.w13_buffer[expert_id]
+    def get_w2_slice(self, expert_id: int) -> torch.Tensor:
+        return self.w2_buffer[expert_id]
+    def set_load_state(self, layer_id,expert_id,state):
+        self._EXPERT_WEIGHT_LOADED[str(layer_id)][str(expert_id)]=state
+        
+    def unload_expert(self, layer_id,expert_id: int) -> bool:
+
+            if not self.is_loaded(layer_id,expert_id):
+                return # 已经是未加载状态
+            # 清零对应 slice
+            self.global_w2_tensor[expert_id].zero_()
+            self.global_w13_tensor[expert_id].zero_()
+            # 更新状态
+            self.set_load_state(layer_id,expert_id,False)
+    def clear_layer(self,layer_id):
+        self.global_w2_tensor.zero_()
+        self.global_w13_tensor.zero_()
+        for i in range(self.num_experts):
+            self.set_load_state(layer_id,i,False)
+    
+    def load_weight(self,layer_id,rank,expert_id):
+        target_weight_w1="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(1)+".weight"
+        target_weight_w2="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(2)+".weight"
+        target_weight_w3="model.layers."+str(rank)+".block_sparse_moe.experts."+str(expert_id)+".w"+str(3)+".weight"
+        self.global_w2_tensor[expert_id]=load_expert_weight(self.weight_file,target_weight_w2)
+        self.global_w13_tensor[expert_id]= torch.cat([load_expert_weight(self.weight_file,target_weight_w1), load_expert_weight(self.weight_file,target_weight_w3)], dim=0)
+        self.set_load_state(layer_id,expert_id,True)
+        
+manager=None
+#==========================================
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -295,19 +347,19 @@ class CPUFusedMOE:
         self,
         layer: torch.nn.Module,
     ) -> None:
-        global global_w13_tensor
-        global global_w2_tensor
-        if global_w13_tensor==None:
-            global_w13_tensor = torch.empty_like(layer.w13_weight)
-        if global_w2_tensor==None:
-            global_w2_tensor = torch.empty_like(layer.w2_weight)
-        layer.w13_weight.set_(global_w13_tensor)
-        layer.w2_weight.set_(global_w2_tensor)
+        global manager
+        
         use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
         num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
         has_w2_bias = hasattr(layer, "w2_bias")
-
+        if manager == None:
+            manager = ExpertWeightManager(
+                num_experts,
+                layer.w13_weight,layer.w2_weight
+            )
+        layer.w13_weight.set_(manager.global_w13_tensor )
+        layer.w2_weight.set_(manager.global_w2_tensor )
         layer.gate_up_linear = []
         layer.down_linear = []
         # layer.w2_weight
@@ -320,7 +372,8 @@ class CPUFusedMOE:
             layer_w2_bias = layer.w2_bias[i] if has_w2_bias else None
             if is_all_zero(layer_w13_weight) and is_all_zero(layer_w2_weight):
                 weight_loaded=False
-            _EXPERT_WEIGHT_LOADED[str(id(layer))][str(i)]=weight_loaded
+            manager.set_load_state(id(layer),i,weight_loaded)
+    
                 
             if use_onednn_mm:
                 gate_up_handle = ops.create_onednn_mm(layer_w13_weight.t(), 32)
@@ -346,10 +399,9 @@ class CPUFusedMOE:
         if use_onednn_mm:  # remove weight
             layer.w13_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        # print(_EXPERT_WEIGHT_LOADED)
+
         _CPU_MOE_LAYER_CACHE[id(layer)] = weakref.ref(layer)
-        # print("sleep..")
-        # time.sleep(10)
+
 
     def forward_grouped_gemm(
         self,
@@ -385,8 +437,6 @@ class CPUFusedMOE:
     ) -> torch.Tensor:
         output = torch.empty_like(input)
         layer_id = id(layer)
-        # print("forward_torch")
-        
         torch.ops.vllm.cpu_fused_moe_torch(
             layer_id,
             output,
@@ -409,17 +459,19 @@ def cpu_fused_moe_torch(
     activation: str,
     global_num_experts: int = -1,
 ) -> None:
+    global manager
     # 获取 layer_id 在插入顺序中的 0-based 排名
     keys_in_order = list(_CPU_MOE_LAYER_CACHE.keys())
     rank = keys_in_order.index(layer_id)  # 0-based 
     print("=== cpu_fused_moe_torch 参数详情 ===")
     print(f"layer_id: {layer_id}")
     print(f"rank: {rank}")
-    print(f"global_num_experts: {global_num_experts}")
-    # 可选：打印部分数值（避免太多）
-    print(f"topk_ids (first 10): {topk_ids.flatten()[:10].tolist()}")
+    # print(f"global_num_experts: {global_num_experts}")
+    # # 可选：打印部分数值（避免太多）
+    # print(f"topk_ids (first 10): {topk_ids.flatten()[:10].tolist()}")
     print("====================================\n")
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
+    manager.set_current_rank(rank)
     # print(layer)
     # print(GLOBAL_HF_WEIGHTS_FILE)
     len_experts = global_num_experts
@@ -437,33 +489,24 @@ def cpu_fused_moe_torch(
         
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
-            
-            continue
-        if(_EXPERT_WEIGHT_LOADED[str(layer_id)][str(i)]):
-            
+            manager.unload_expert(layer_id,i)
             print("coolling: expert",i,"loaded")
-        else:
-            #coolling:todo
+            continue
+        if not manager.is_loaded(layer_id,i):
+            
             print("coolling: expert",i,"no loaded")
-            target_weight_w1="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(1)+".weight"
-            target_weight_w2="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(2)+".weight"
-            target_weight_w3="model.layers."+str(rank)+".block_sparse_moe.experts."+str(i)+".w"+str(3)+".weight"
-            layer.w2_weight[i]=load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w2)
-            layer.w13_weight[i]= torch.cat([load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w1), load_expert_weight(GLOBAL_HF_WEIGHTS_FILE,target_weight_w3)], dim=0)
+            manager.load_weight(layer_id,rank,i)
             
-            
+    
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
         expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
-        # layer.w2_weight[i].zero_()
-        # layer.w13_weight[i].zero_()
-    print("idd",layer.w2_weight.data_ptr())
-    layer.w2_weight.zero_()
-    layer.w13_weight.zero_()
+        manager.unload_expert(layer_id,i)
+   
+
     outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
     new_x = torch.empty_like(outs)
 
