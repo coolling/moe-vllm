@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python3
+#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
 
 import sys
 import json

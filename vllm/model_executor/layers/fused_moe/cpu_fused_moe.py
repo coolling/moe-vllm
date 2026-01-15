@@ -95,6 +95,9 @@ class ExpertWeightManager:
         )
         self.producer_thread.start()
 
+    def set_load_state(self,layer_id: int, expert_id: int,state):
+        self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = state
+        
     def set_total_layers(self, total_layers: int):
         """由外部调用，告知总共有多少 MoE 层（必须在推理开始前设置）"""
         self.total_layers = total_layers
@@ -113,16 +116,16 @@ class ExpertWeightManager:
         
         w13_t=load_expert_weight(self.weight_file, w13_key)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] time1 {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG2] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         # w2_buf[expert_id].copy_(w2_t)
         # w13_buf[expert_id].copy_(w13_t)
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] time2 {elapsed_ms:.2f} ms")
-
-        self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
+        # print(f"[DEBUG2] time2 {elapsed_ms:.2f} ms")
+        self.set_load_state(layer_id,expert_id,1)
+        # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
     def _producer_worker(self):
         """后台生产者线程：循环预加载下一层权重"""
@@ -147,11 +150,20 @@ class ExpertWeightManager:
 
                 w2_buf, w13_buf = self.buffer_pool.pop()
                 target_layer_id = self.layer_id_to_load
-
+                # 入队
+                self.queue.append((target_layer_id, w2_buf, w13_buf))
+                                # 通知消费者
+                self.not_empty.notify_all()
                 # 加载整层所有 experts
                 try:
                     for eid in range(self.num_experts):
+                        self.not_empty.notify_all()
+                        if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1:
+                            print("跳过加载 ",target_layer_id,eid)
+                            continue
                         self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
+                        print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
+                        
                     # print(w13_buf,w2_buf)
                 except Exception as e:
                     print(f"[Producer] Failed to load layer {target_layer_id}: {e}")
@@ -160,15 +172,13 @@ class ExpertWeightManager:
                     time.sleep(0.5)
                     continue
 
-                # 入队
-                self.queue.append((target_layer_id, w2_buf, w13_buf))
+                
                 print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
 
                 # 更新下一个要加载的 layer_id（循环）
                 self.layer_id_to_load = (self.layer_id_to_load + 1) % self.total_layers
 
-                # 通知消费者
-                self.not_empty.notify_all()
+
 
             # 控制加载节奏（避免 CPU 占满）
             time.sleep(0.01)
@@ -178,19 +188,16 @@ class ExpertWeightManager:
         消费者调用：等待并绑定队列头部的 buffer 到 global_tensor。
         返回 True 表示成功，False 表示已关闭。
         """
-        with self.not_empty:
-            while len(self.queue) == 0 and not self._shutdown.is_set():
-                self.not_empty.wait(timeout=1.0)
-
-            if self._shutdown.is_set():
-                return False
-
-            layer_id, w2_buf, w13_buf = self.queue[0]
-            if layer_id != expected_layer_id:
-                print(f"[Consumer] Expected layer {expected_layer_id}, but head is {layer_id}")
-                return False
+        # with self.not_empty:
             
-            return True
+        while len(self.queue) == 0 and not self._shutdown.is_set():
+            time.sleep(0.01)
+            # self.not_empty.wait(timeout=0.01)
+
+        if self._shutdown.is_set():
+            return False
+        
+        return True
 
     def release_current_layer(self):
         """消费者调用：释放当前层 buffer，归还到池中"""
@@ -198,8 +205,9 @@ class ExpertWeightManager:
             # if self.queue:
                 layer_id, w2_buf, w13_buf = self.queue.popleft()
                 self.buffer_pool.append((w2_buf, w13_buf))
- 
-                self._EXPERT_WEIGHT_LOADED[layer_id].clear()
+                for i in range(self.num_experts):
+                    self.set_load_state(layer_id,i,0)
+                    # self._EXPERT_WEIGHT_LOADED[layer_id][i]=False
                 self.not_full.notify()  
 
     def shutdown(self):
@@ -496,15 +504,15 @@ class CPUFusedMOE:
         layer.down_linear = []
         # layer.w2_weight
         for i in range(num_experts):
-            weight_loaded=True
+            weight_loaded=1
             layer_w13_weight = layer.w13_weight[i]
             # print(i,layer_w13_weight)
             layer_w13_bias = layer.w13_bias[i] if has_w13_bias else None
             layer_w2_weight = layer.w2_weight[i]
             layer_w2_bias = layer.w2_bias[i] if has_w2_bias else None
             if is_all_zero(layer_w13_weight) and is_all_zero(layer_w2_weight):
-                weight_loaded=False
-            # manager.set_load_state(id(layer),i,weight_loaded)
+                weight_loaded=0
+            manager.set_load_state(len(_CPU_MOE_LAYER_CACHE),i,weight_loaded)
             
                 
             if use_onednn_mm:
@@ -605,12 +613,7 @@ def cpu_fused_moe_torch(
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
     print("====================================\n")
     # print(layer.w13_weight)
-    while not manager.acquire_weights_for_layer(layer,rank):
-        print("wait load",rank)
-        time.sleep(0)
-    _, w2_buf, w13_buf=manager.queue[0]
-    print("layer.w13_weight.data_ptr()",layer.w13_weight.data_ptr())
-    print("manager.global_w13_tensor.data_ptr()",manager.global_w13_tensor.data_ptr())
+    
     len_experts = global_num_experts
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
@@ -623,10 +626,26 @@ def cpu_fused_moe_torch(
     start_idx = 0
     
     for i, num_tokens in enumerate(tokens_per_expert):
+        if num_tokens == 0:
+            print("设置跳过加载 ",rank,i)
+            manager.set_load_state(rank,i,-1)
+    print("将要获取",rank,"层",len(manager.queue))
+    while not manager.acquire_weights_for_layer(layer,rank):
+        print("wait load",rank)
+        time.sleep(0)
+    _, w2_buf, w13_buf=manager.queue[0]
+    print("获取了",rank,"层")
+    print("layer.w13_weight.data_ptr()",layer.w13_weight.data_ptr())
+    print("manager.global_w13_tensor.data_ptr()",manager.global_w13_tensor.data_ptr())
+    for i, num_tokens in enumerate(tokens_per_expert):
         
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
             continue
+        print("即将计算",i)
+        while manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
+            print("wait..")
+            time.sleep(0.01)
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
