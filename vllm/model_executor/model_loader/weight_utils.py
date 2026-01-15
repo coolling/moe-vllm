@@ -666,11 +666,10 @@ def load_expert_weight(
     hf_weights_files: list[str],
     weight_name:str="",):
     
-
-    # # 2. 清空Python/PyTorch缓存
-    # gc.collect()
-    # torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    # torch._C._emptyCUDAIPCCache() if torch.cuda.is_available() else None
+    import time 
+    start = time.time()
+    def sanitize_filename(name: str) -> str:
+        return re.sub(r'[\\/:*?"<>|]', '_', name)
 
     for st_file in hf_weights_files:
         try:
@@ -699,18 +698,10 @@ def load_expert_weight(
                     shutil.copyfileobj(src_f, dst_f, length=4096)  # 4KB块复制，对齐磁盘
                 fcntl.flock(src_f.fileno(), fcntl.LOCK_UN)  # 释放锁
 
-            # 5. 禁用safetensors所有缓存，读取临时文件
-            # os.environ["SAFETENSORS_DISABLE_MEMORY_MAPPING"] = "1"
-            # os.environ["SAFETENSORS_CACHE_DISABLE"] = "1"
-            # os.environ["SAFETENSORS_FORCE_DISK_READ"] = "1"
-            
-            # # 读取前再次清空临时文件的缓存（针对单个文件）
-            # os.system(f"posix_fadvise {tmp_file_path} 0 0 POSIX_FADV_DONTNEED 2>/dev/null")
-            
+         
+            os.system(f"posix_fadvise {tmp_file_path} 0 0 POSIX_FADV_DONTNEED 2>/dev/null")
             tensor_dict = load_file(tmp_file_path, device="cpu")
             tensor = tensor_dict.get(weight_name, None)
-
-            # 6. 立即删除临时文件（用完即删，无残留）
             os.unlink(tmp_file_path)
 
             if tensor is None:
@@ -721,13 +712,11 @@ def load_expert_weight(
             # print(f"=== 无缓存加载结果 ===")
             # print(f"权重名：{weight_name}")
             # print(f"原始形状：{tensor.shape}")
+            elapsed_ms = (time.time() - start) * 1000
             
             
-            # 确保张量独立，无缓存关联
-            tensor = tensor.cpu().clone().detach()
-            del tensor_dict
-            gc.collect()
-
+           
+            # print(f"加载时间 in {elapsed_ms:.2f} ms")
             return tensor
 
         except Exception as e:
@@ -816,6 +805,7 @@ def safetensors_weights_iterator(
 
                         # 防覆盖：文件已存在则删除后重新保存
                         if os.path.exists(save_path):
+                            continue
                             os.remove(save_path)
                             print(f"删除旧文件：{save_path}")
 
