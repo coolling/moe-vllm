@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python
+#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'typer==0.21.1','console_scripts','typer'
 import re
 import sys

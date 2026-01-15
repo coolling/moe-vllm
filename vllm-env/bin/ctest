@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python3
+#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python3
 import sys
 from cmake import ctest
 if __name__ == '__main__':

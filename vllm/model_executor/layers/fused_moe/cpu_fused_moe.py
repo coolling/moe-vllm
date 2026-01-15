@@ -113,14 +113,14 @@ class ExpertWeightManager:
         
         w13_t=load_expert_weight(self.weight_file, w13_key)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG1] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         # w2_buf[expert_id].copy_(w2_t)
         # w13_buf[expert_id].copy_(w13_t)
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG1] time2 {elapsed_ms:.2f} ms")
 
         self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         

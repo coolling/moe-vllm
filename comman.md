@@ -12,3 +12,13 @@ python chat.py
 
 # 监测
 top -b -n 1 -c | grep -i "VLLM::EngineCore"
+
+
+# 编译
+python3 -m venv vllm-env
+
+# 3. 激活并安装
+source vllm-env/bin/activate
+pip install --upgrade pip
+pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu

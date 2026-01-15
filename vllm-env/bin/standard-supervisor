@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python
+#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'model-hosting-container-standards==0.1.13','console_scripts','standard-supervisor'
 import re
 import sys

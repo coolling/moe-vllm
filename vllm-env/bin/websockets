@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/vllm/vllm-env/bin/python
+#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'websockets==16.0','console_scripts','websockets'
 import re
 import sys
