@@ -14,7 +14,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
-from vllm.model_executor.model_loader.weight_utils import load_expert_weight
+from vllm.model_executor.model_loader.weight_utils import load_expert_weight,load_expert_weight_safeopen
 _CPU_MOE_LAYER_CACHE = {}
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
@@ -33,6 +33,7 @@ def is_all_zero(tensor):
 import ctypes
 
 def fast_copy(dst: torch.Tensor, src: torch.Tensor):
+    # dst.set_(src.storage(), src.storage_offset(), src.size(), src.stride())
     """使用ctypes进行快速内存复制"""
     # 确保张量连续
     if not dst.is_contiguous():
@@ -44,7 +45,8 @@ def fast_copy(dst: torch.Tensor, src: torch.Tensor):
     dst_ptr = dst.data_ptr()
     src_ptr = src.data_ptr()
     nbytes = dst.numel() * dst.element_size()
-    
+    # t=torch.empty_like(src)
+    # t.copy_(src)
     # 使用memmove进行内存复制
     ctypes.memmove(dst_ptr, src_ptr, nbytes)
 class ExpertWeightManager:
@@ -112,22 +114,23 @@ class ExpertWeightManager:
         w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
         start = time.time()
         # 加载 w2
-        w2_t=load_expert_weight(self.weight_file, w2_key)
-        
-        w13_t=load_expert_weight(self.weight_file, w13_key)
+        w2_t=load_expert_weight_safeopen(self.weight_file, w2_key)
+        w13_t=load_expert_weight_safeopen(self.weight_file, w13_key)
+   
         elapsed_ms = (time.time() - start) * 1000
-        # print(f"[DEBUG2] time1 {elapsed_ms:.2f} ms")
+        # print(w2_t)
+        # print(w13_t)
+        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
         start = time.time()
-        # w2_buf[expert_id].copy_(w2_t)
-        # w13_buf[expert_id].copy_(w13_t)
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        # print(f"[DEBUG2] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
     def _producer_worker(self):
+        time.sleep(3)
         """后台生产者线程：循环预加载下一层权重"""
         while not self._shutdown.is_set():
             if self.total_layers == 0:
@@ -142,11 +145,7 @@ class ExpertWeightManager:
                 if self._shutdown.is_set():
                     break
 
-                # 获取空闲 buffer
-                # if not self.buffer_pool:
-                #     print("[Producer] Warning: No free buffer available!")
-                #     time.sleep(0.05)
-                #     continue
+
 
                 w2_buf, w13_buf = self.buffer_pool.pop()
                 target_layer_id = self.layer_id_to_load
@@ -646,6 +645,7 @@ def cpu_fused_moe_torch(
         while manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
             print("wait..")
             time.sleep(0.01)
+        start=time.time()
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
@@ -654,6 +654,8 @@ def cpu_fused_moe_torch(
         expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
         # manager.unload_expert(layer_id,i)
    
     manager.release_current_layer()

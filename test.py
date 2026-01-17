@@ -59,9 +59,9 @@ def save_expert_weights_single(
 
 # ==================== 执行保存 ====================
 if __name__ == "__main__":
-    weights_files = ["/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE/model-00001-of-00001.safetensors"]
+    weights_files = ["/mnt/nvme0/home/chenyunling/models/mistralai/Mixtral-8x7B-Instruct-v0.1/model-00001-of-00019.safetensors",""]
     # 清空旧的experts文件（避免污染）
-    experts_dir = "/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE/experts"
+    experts_dir = "/mnt/nvme0/home/chenyunling/models/mistralai/Mixtral-8x7B-Instruct-v0.1/experts"
     if os.path.exists(experts_dir):
         for file in os.listdir(experts_dir):
             os.remove(os.path.join(experts_dir, file))

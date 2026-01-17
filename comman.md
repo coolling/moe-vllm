@@ -6,7 +6,7 @@ source vllm-env/bin/activate
 export VLLM_CPU_KVCACHE_SPACE=1
 export VLLM_CPU_OMP_THREADS_BIND=0-11
 python -m vllm.entrypoints.openai.api_server --model /mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
-
+vllm serve --model /mnt/nvme0/home/chenyunling/models/mistralai/Mixtral-8x7B-Instruct-v0.1 --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
 # 客户端
 python chat.py
 
