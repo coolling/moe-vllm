@@ -27,23 +27,26 @@ def concatenate_w1_w3_to_w13(
         bool: 是否成功
     """
     # 构建原始文件名
-    w1_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w1.weight"
-    w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
-    w3_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w3.weight"
+    w1_key = f"model.layers.{rank}.mlp.experts.{expert_id}.up_proj.weight"
+    w2_key = f"model.layers.{rank}.mlp.experts.{expert_id}.gate_proj.weight"
+    w3_key = f"model.layers.{rank}.mlp.experts.{expert_id}.down_proj.weight"
     
     w13_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w13.weight"
+    w_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
     
     # 转换为安全的文件名
     w1_safe = sanitize_filename(w1_key)
+    w2_safe = sanitize_filename(w2_key)
     w3_safe = sanitize_filename(w3_key)
     w13_safe = sanitize_filename(w13_key)
-    
+    w_safe = sanitize_filename(w_key)
     # 构建文件路径
     experts_dir = os.path.join(base_dir, "experts")
     w1_file = os.path.join(experts_dir, f"{w1_safe}.safetensors")
     w3_file = os.path.join(experts_dir, f"{w3_safe}.safetensors")
     w13_file = os.path.join(experts_dir, f"{w13_safe}.safetensors")
-    
+    w2_file = os.path.join(experts_dir, f"{w2_safe}.safetensors")
+    w_file = os.path.join(experts_dir, f"{w_safe}.safetensors")
     # 检查文件是否存在
     if not os.path.exists(w1_file):
         print(f"w1文件不存在: {w1_file}")
@@ -57,19 +60,26 @@ def concatenate_w1_w3_to_w13(
         # 加载w1权重
         with safe_open(w1_file, framework="pt", device="cpu") as f:
             w1_tensor = f.get_tensor(w1_key)
+            print(f"w1形状: {w1_tensor.shape}")
         
         # 加载w3权重
         with safe_open(w3_file, framework="pt", device="cpu") as f:
             w3_tensor = f.get_tensor(w3_key)
+            print(f"w3形状: {w3_tensor.shape}")
         
         # 拼接w1和w3 (在dim=0上拼接)
-        w13_tensor = torch.cat([w1_tensor, w3_tensor], dim=0)
+        w13_tensor = torch.cat([w1_tensor, w3_tensor.transpose(0, 1)], dim=0)
         
         # 保存为新的w13文件
         save_file({w13_key: w13_tensor}, w13_file)
         print(f"已创建w13文件: {w13_file}")
         print(f"w13形状: {w13_tensor.shape}")
-        
+        # 加载w2权重
+        with safe_open(w2_file, framework="pt", device="cpu") as f:
+            w2_tensor = f.get_tensor(w2_key)
+        save_file({w_key: w2_tensor}, w_file)
+        print(f"已创建w13文件: {w_file}")
+        print(f"w2形状: {w2_tensor.shape}")
         # 可选：删除原始文件
         if delete_original:
             os.remove(w1_file)
@@ -130,7 +140,7 @@ def update_load_function_for_w13(
     
     Args:
         weight_file: 主safetensors文件路径
-        weight_name: 权重名称，如 "model.layers.0.block_sparse_moe.experts.0.w13.weight"
+        weight_name: 权重名称，如 "model.layers.0.mlp.experts.0.w13.weight"
         output_buffer: 预分配的输出缓冲区
     
     Returns:
@@ -156,14 +166,14 @@ def update_load_function_for_w13(
             # 回退到加载w1和w3然后拼接
             # 提取层ID和expert ID
             import re
-            match = re.search(r'layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)', weight_name)
+            match = re.search(r'layers\.(\d+)\.mlp\.experts\.(\d+)', weight_name)
             if match:
                 rank = int(match.group(1))
                 expert_id = int(match.group(2))
                 
                 # 构建w1和w3的文件名
-                w1_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w1.weight"
-                w3_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w3.weight"
+                w1_key = f"model.layers.{rank}.mlp.experts.{expert_id}.up_proj.weight"
+                w3_key = f"model.layers.{rank}.mlp.experts.{expert_id}.down_proj.weight"
                 
                 w1_safe = sanitize_filename(w1_key)
                 w3_safe = sanitize_filename(w3_key)
@@ -201,9 +211,9 @@ def update_load_function_for_w13(
 # 使用示例
 if __name__ == "__main__":
     # 1. 预处理：将w1和w3合并为w13
-    base_dir = "/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE"  # 修改为你的模型目录
-    num_layers = 32  # 修改为你的MoE层数
-    num_experts_per_layer = 8  # 修改为每层expert数
+    base_dir = "/mnt/nvme0/home/chenyunling/models/Qwen/Qwen1.5-MoE-A2.7B-Chat"  # 修改为你的模型目录
+    num_layers = 24  # 修改为你的MoE层数
+    num_experts_per_layer = 60  # 修改为每层expert数
     
     # 处理所有experts（不删除原始文件）
     process_all_experts(
@@ -213,30 +223,4 @@ if __name__ == "__main__":
         delete_original=False  # 第一次运行时设为False，确认无误后再设为True
     )
     
-    # 2. 更新你的加载代码使用w13
-    # 修改 _load_expert_into_buffer 函数
-    def _load_expert_into_buffer_updated(self, layer_id: int, expert_id: int, 
-                                      w13_buf: torch.Tensor, w2_buf: torch.Tensor):
-        """使用w13文件加载"""
-        rank = layer_id
-        
-        # 使用w13文件
-        w13_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w13.weight"
-        w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
-        
-        # 直接加载w13到缓冲区
-        success_w13 = update_load_function_for_w13(
-            self.weight_file,
-            w13_key,
-            output_buffer=w13_buf[expert_id]
-        )
-        
-        # 加载w2
-        success_w2 = update_load_function_for_w13(
-            self.weight_file,
-            w2_key,
-            output_buffer=w2_buf[expert_id]
-        )
-        
-        self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
-        return success_w13 and success_w2
+   
