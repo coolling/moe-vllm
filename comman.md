@@ -16,7 +16,7 @@ top -b -n 1 -c | grep -i "VLLM::EngineCore"
 
 
 # 编译
-python3 -m venv vllm-env
+python3.10 -m venv vllm-env
 
 # 3. 激活并安装
 source vllm-env/bin/activate

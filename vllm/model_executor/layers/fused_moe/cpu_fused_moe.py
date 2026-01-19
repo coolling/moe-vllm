@@ -120,12 +120,12 @@ class ExpertWeightManager:
         elapsed_ms = (time.time() - start) * 1000
         # print(w2_t)
         # print(w13_t)
-        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG1] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG1] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
@@ -638,11 +638,11 @@ def cpu_fused_moe_torch(
     expert_info_sorted = sorted(expert_info, key=lambda x: x[1], reverse=True)
     # print("sorted_indices",expert_info_sorted)
     manager.layer_expert_info_sorted[rank]=expert_info_sorted
-
+    # =================调整专家计算顺序=================
     outputs = []
-    outputs_t=defaultdict(dict)
-    start_idx = 0
-    start_idxs=[0]*len_experts
+    outputs_t=defaultdict(dict) 
+    start_idx = 0 #每个专家对应的开始token
+    start_idxs=[0]*len_experts #每个专家对应的结束token
     end_idxs=[0]*len_experts
     for i, num_tokens in enumerate(tokens_per_expert):
         end_idx = start_idx + num_tokens
@@ -652,17 +652,39 @@ def cpu_fused_moe_torch(
         if num_tokens == 0:
             print("设置跳过加载 ",rank,i)
             manager.set_load_state(rank,i,-1)
-        
+    # ===================================================
+    
+    # =================确保该层已经开始加载=================
     print("将要获取",rank,"层",len(manager.queue))
     while not manager.acquire_weights_for_layer(layer,rank):
         print("wait load",rank)
         time.sleep(0)
     _, w2_buf, w13_buf=manager.queue[0]
     print("获取了",rank,"层")
+    #===================================================
+    
+    # ==========如果有已经加载了的专家可以先计算==============
+    pre_comp=[]
+    for i, num_tokens in enumerate(tokens_per_expert):
+        if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
+            continue
+        print("已经加载完成的专家",i,"先计算")
+        pre_comp.append(i)
+        start=time.time()
+        layer.w2_weight[i]=w2_buf[i]
+        layer.w13_weight[i]=w13_buf[i] 
+        tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
+        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
+        gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
+        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        outputs_t[i]=expert_out
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG] 先行计算专家{rank}-{i} {elapsed_ms:.2f} ms")
+    # ============================================================
+    
+    # ==========根据专家激活token数排序计算顺序==============
     for i, num_tokens in manager.layer_expert_info_sorted[rank]:
-        
-        
-        if num_tokens == 0:
+        if num_tokens == 0 or i in pre_comp:
             continue
         print("即将计算",i)
         while manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
@@ -680,7 +702,13 @@ def cpu_fused_moe_torch(
         
         elapsed_ms = (time.time() - start) * 1000
         print(f"[DEBUG] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
-        # manager.unload_expert(layer_id,i)
+    # ============================================================
+  
+        
+        
+        
+        
+    # 聚合专家计算结果
     for i, num_tokens in enumerate(tokens_per_expert):
         if num_tokens == 0:
             continue

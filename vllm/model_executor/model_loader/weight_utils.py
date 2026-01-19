@@ -1156,7 +1156,7 @@ def safetensors_weights_iterator(
                         # ========== 核心修改：拆分拼接张量 ==========
                         # 1. 读取原始拼接张量
                         full_tensor = f.get_tensor(name)
-                        print(f"原始拼接张量形状：{name} → {full_tensor.shape}")
+                        # print(f"原始拼接张量形状：{name} → {full_tensor.shape}")
                         
                         
 
