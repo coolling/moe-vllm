@@ -67,7 +67,7 @@ class ExpertWeightManager:
 
         # 加载状态跟踪（可选，用于调试）
         self._EXPERT_WEIGHT_LOADED = defaultdict(dict)
-        self.layer_expert_info_sorted = defaultdict(dict)
+        self.layer_expert_info_sorted = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
         # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
         self.buffer_pool = []
         for _ in range(max_size):
@@ -120,12 +120,12 @@ class ExpertWeightManager:
         elapsed_ms = (time.time() - start) * 1000
         # print(w2_t)
         # print(w13_t)
-        print(f"[DEBUG1] time1 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG3] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG3] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
@@ -666,7 +666,7 @@ def cpu_fused_moe_torch(
     # ==========如果有已经加载了的专家可以先计算==============
     pre_comp=[]
     for i, num_tokens in enumerate(tokens_per_expert):
-        if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
+        if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             continue
         print("已经加载完成的专家",i,"先计算")
         pre_comp.append(i)
@@ -687,7 +687,7 @@ def cpu_fused_moe_torch(
         if num_tokens == 0 or i in pre_comp:
             continue
         print("即将计算",i)
-        while manager._EXPERT_WEIGHT_LOADED[rank][i] ==0:
+        while manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             print("wait..")
             time.sleep(0.01)
         start=time.time()
