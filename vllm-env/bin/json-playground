@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
+#!/sharenvme/usershome/cyl/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'partial-json-parser==0.2.1.1.post7','console_scripts','json-playground'
 import re
 import sys

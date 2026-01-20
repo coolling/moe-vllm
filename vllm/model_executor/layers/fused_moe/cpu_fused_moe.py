@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
 from collections.abc import Callable
-from collections import defaultdict
 import torch
 from torch.nn import functional as F
 import time
 from collections import defaultdict, deque
 import threading
+import json
+import os
+from typing import Dict, List, Any, Optional
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
@@ -22,6 +24,71 @@ _CPU_MOE_ACT = {
 }
 # coolling ==========================
 infer_c=0
+
+
+class RankExpertAnalyzer:
+    """Rank-Expert分布分析器"""
+    
+    def __init__(self, json_file_path: str):
+        """
+        初始化分析器
+        
+        Args:
+            json_file_path: JSON文件路径
+        """
+        self.file_path = json_file_path
+
+        self.rank_distributions = None
+        
+        # 加载数据
+        self.load_data()
+    
+    def load_data(self) -> bool:
+        """
+        加载JSON数据
+        
+        Returns:
+            成功加载返回True，否则返回False
+        """
+        try:
+            if not os.path.exists(self.file_path):
+                print(f"错误: 文件不存在 - {self.file_path}")
+                return False
+            
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+            
+            # 提取主要部分
+       
+            self.rank_distributions = self.data.get('rank_distributions', {})
+            print("热门专家信息加载成功！")
+            return True
+            
+        except json.JSONDecodeError as e:
+            print(f"错误: JSON文件格式错误 - {e}")
+            return False
+        except Exception as e:
+            print(f"错误: 加载文件失败 - {e}")
+            return False
+    
+
+    
+
+    
+    def get_rank_distribution(self, rank: int) -> Optional[Dict[str, Any]]:
+        """
+        获取特定rank的分布信息
+        
+        Args:
+            rank: 要查询的rank编号
+            
+        Returns:
+            分布信息字典，如果不存在则返回None
+        """
+        rank_str = str(rank)
+        if rank_str in self.rank_distributions:
+            return self.rank_distributions[rank_str]
+        return None
 def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     # 检查形状是否相同
     if a.shape != b.shape:
@@ -59,7 +126,12 @@ class ExpertWeightManager:
     ):
         self.num_experts = num_experts
         self.weight_file = GLOBAL_HF_WEIGHTS_FILE
+        json_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/rank_experts_distribution.json"
+        if not os.path.exists(json_file):
+            print(f"文件 {json_file} 不存在")
         
+        # 创建分析器
+        self.analyzer = RankExpertAnalyzer(json_file)
         # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
         self.global_w13_tensor = torch.empty_like(w13)
         print("init",self.global_w13_tensor.data_ptr())
@@ -96,7 +168,15 @@ class ExpertWeightManager:
             name="MoEWeightProducer"
         )
         self.producer_thread.start()
-
+    def predict_experts_order(self,rank):
+        re=[]
+        if self.analyzer.get_rank_distribution(rank):
+            for exp_info in self.analyzer.get_rank_distribution(rank)['distribution']:
+                re.append(exp_info['expert'])
+        for i in range(self.num_experts):
+            if i not in re:
+                re.append(i)
+        return re
     def set_load_state(self,layer_id: int, expert_id: int,state):
         self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = state
         
@@ -156,7 +236,8 @@ class ExpertWeightManager:
                 self.not_empty.notify_all()
                 # 加载整层所有 experts
                 try:
-                    for eid in range(self.num_experts):
+                    predict_experts_order=self.predict_experts_order(target_layer_id)
+                    for eid in predict_experts_order:
                         self.not_empty.notify_all()
                         if self.layer_expert_info_sorted[target_layer_id] :
                             print("self.layer_expert_info_sorted[target_layer_id]!=None")
@@ -397,15 +478,15 @@ class SGLFusedMOE:
 
 class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
-        # print("coolling:CPUFusedMOE")
+        print("coolling:CPUFusedMOE")
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
-        if use_grouped_gemm:
-            self.forward_method = self.forward_grouped_gemm
-            self.init_moe_grouped_gemm(layer=layer)
-        else:
-            self.forward_method = self.forward_torch
-            self.init_moe_torch(layer=layer)
+        # if use_grouped_gemm:
+        #     self.forward_method = self.forward_grouped_gemm
+        #     self.init_moe_grouped_gemm(layer=layer)
+        # else:
+        self.forward_method = self.forward_torch
+        self.init_moe_torch(layer=layer)
 
     def __call__(
         self,
@@ -669,10 +750,13 @@ def cpu_fused_moe_torch(
         if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             continue
         print("已经加载完成的专家",i,"先计算")
+        
         pre_comp.append(i)
         start=time.time()
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
+        print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
+        print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
@@ -693,6 +777,8 @@ def cpu_fused_moe_torch(
         start=time.time()
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
+        print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
+        print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)

@@ -18,9 +18,9 @@ os.environ['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 # === 请求参数 ===
 url = "http://localhost:8000/v1/chat/completions"
 payload = {
-    "model": "/mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE",
+    "model": "/sharenvme/usershome/cyl/test/model/Isotonic/smol_llama-4x220M-MoE",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 50,
+    "max_tokens": 100,
     "temperature": 0,
     "chat_template": "{% for message in messages %}{% if message['role'] == 'user' %}<s>[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"
 }

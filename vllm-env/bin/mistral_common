@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
+#!/sharenvme/usershome/cyl/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'mistral-common==1.8.8','console_scripts','mistral_common'
 import re
 import sys

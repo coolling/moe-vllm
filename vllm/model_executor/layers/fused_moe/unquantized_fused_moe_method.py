@@ -207,35 +207,35 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
+            # if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+            #     from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 
-                dtype_w13 = layer.w13_weight.dtype
-                _, n_w13, k_w13 = layer.w13_weight.size()
-                dtype_w2 = layer.w2_weight.dtype
-                _, n_w2, k_w2 = layer.w2_weight.size()
-                if (
-                    envs.VLLM_CPU_SGL_KERNEL
-                    and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
-                    and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)
-                ):
-                    packed_w13_weight = torch.ops._C.convert_weight_packed(
-                        layer.w13_weight
-                    )
-                    assert packed_w13_weight.size() == layer.w13_weight.size()
-                    layer.w13_weight.copy_(packed_w13_weight)
-                    del packed_w13_weight
-                    packed_w2_weight = torch.ops._C.convert_weight_packed(
-                        layer.w2_weight
-                    )
-                    assert packed_w2_weight.size() == layer.w2_weight.size()
-                    layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
-                    # print("asdfghjk!!!!!!!!!!!")
-                else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-            else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+            #     dtype_w13 = layer.w13_weight.dtype
+            #     _, n_w13, k_w13 = layer.w13_weight.size()
+            #     dtype_w2 = layer.w2_weight.dtype
+            #     _, n_w2, k_w2 = layer.w2_weight.size()
+            #     if (
+            #         envs.VLLM_CPU_SGL_KERNEL
+            #         and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
+            #         and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)
+            #     ):
+            #         packed_w13_weight = torch.ops._C.convert_weight_packed(
+            #             layer.w13_weight
+            #         )
+            #         assert packed_w13_weight.size() == layer.w13_weight.size()
+            #         layer.w13_weight.copy_(packed_w13_weight)
+            #         del packed_w13_weight
+            #         packed_w2_weight = torch.ops._C.convert_weight_packed(
+            #             layer.w2_weight
+            #         )
+            #         assert packed_w2_weight.size() == layer.w2_weight.size()
+            #         layer.w2_weight.copy_(packed_w2_weight)
+            #         layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+            #         print("asdfghjk!!!!!!!!!!!")
+            #     else:
+            #         layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+            # else:
+            layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.rocm_aiter_moe_enabled:

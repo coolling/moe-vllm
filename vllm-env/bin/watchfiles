@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/vllm/vllm-env/bin/python
+#!/sharenvme/usershome/cyl/test/vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'watchfiles==1.1.1','console_scripts','watchfiles'
 import re
 import sys

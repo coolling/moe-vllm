@@ -7,7 +7,7 @@ export VLLM_CPU_KVCACHE_SPACE=10
 export VLLM_CPU_OMP_THREADS_BIND=0-11
 python -m vllm.entrypoints.openai.api_server --model /mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
 vllm serve --model /mnt/nvme0/home/chenyunling/models/Qwen/Qwen1.5-MoE-A2.7B-Chat --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
-vllm serve --model /mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
+vllm serve --model /sharenvme/usershome/cyl/test/model/Isotonic/smol_llama-4x220M-MoE --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
 # 客户端
 python chat.py
 
@@ -23,3 +23,19 @@ source vllm-env/bin/activate
 pip install --upgrade pip
 pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+
+
+
+# 2. 清理所有构建缓存
+rm -rf build/
+rm -rf .deps/
+rm -rf dist/
+rm -rf *.egg-info/
+rm -f CMakeCache.txt
+rm -rf cmake-build-*/
+
+# 3. 清理 Python 构建文件
+find . -name "*.so" -type f -delete
+find . -name "*.pyc" -type f -delete
+find . -name "__pycache__" -type d -exec rm -rf {} +

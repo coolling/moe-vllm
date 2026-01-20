@@ -700,7 +700,7 @@ void cpu_fused_moe(
     const torch::Tensor& topk_weights,            // [token_num, k], float32
     const torch::Tensor& topk_id,                 // [token_num, k], int32
     const std::string& act, const std::string& isa) {
-      printf("!!!!!!!!!!!!!!!\n");
+      // printf("!!!!!!!!!!!!!!!\n");
   const int32_t token_num = input.size(0);
   const int32_t input_size_13 = input.size(1);
   const int64_t input_stride = input.stride(0);

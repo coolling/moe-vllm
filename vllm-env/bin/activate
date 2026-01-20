@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV=/mnt/nvme0/home/chenyunling/test/vllm/vllm-env
+VIRTUAL_ENV=/sharenvme/usershome/cyl/test/vllm/vllm-env
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

@@ -581,7 +581,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        print("coolling:MixtralForCausalLM")
+        # print("coolling:MixtralForCausalLM")
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
