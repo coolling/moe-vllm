@@ -56,11 +56,11 @@ class RankExpertAnalyzer:
                 return False
             
             with open(self.file_path, 'r', encoding='utf-8') as f:
-                self.data = json.load(f)
+                data = json.load(f)
             
             # 提取主要部分
        
-            self.rank_distributions = self.data.get('rank_distributions', {})
+            self.rank_distributions = data.get('rank_distributions', {})
             print("热门专家信息加载成功！")
             return True
             
@@ -87,6 +87,7 @@ class RankExpertAnalyzer:
         """
         rank_str = str(rank)
         if rank_str in self.rank_distributions:
+            # print(self.rank_distributions[rank_str])
             return self.rank_distributions[rank_str]
         return None
 def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
@@ -134,12 +135,12 @@ class ExpertWeightManager:
         self.analyzer = RankExpertAnalyzer(json_file)
         # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
         self.global_w13_tensor = torch.empty_like(w13)
-        print("init",self.global_w13_tensor.data_ptr())
+        # print("init",self.global_w13_tensor.data_ptr())
         self.global_w2_tensor = torch.empty_like(w2)
 
-        # 加载状态跟踪（可选，用于调试）
-        self._EXPERT_WEIGHT_LOADED = defaultdict(dict)
-        self.layer_expert_info_sorted = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
+        # 加载状态跟踪
+        self._EXPERT_WEIGHT_LOADED = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
+        self.layer_expert_info_sorted = defaultdict(dict)
         # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
         self.buffer_pool = []
         for _ in range(max_size):
@@ -173,6 +174,7 @@ class ExpertWeightManager:
         if self.analyzer.get_rank_distribution(rank):
             for exp_info in self.analyzer.get_rank_distribution(rank)['distribution']:
                 re.append(exp_info['expert'])
+            print(re)
         for i in range(self.num_experts):
             if i not in re:
                 re.append(i)
@@ -249,7 +251,7 @@ class ExpertWeightManager:
                                 self._load_expert_into_buffer(target_layer_id, i, w13_buf, w2_buf)
                                 print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
                             break
-                        if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1:
+                        if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==1:
                             print("跳过加载 ",target_layer_id,eid)
                             continue
                         self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
