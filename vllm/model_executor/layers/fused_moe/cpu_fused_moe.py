@@ -237,39 +237,39 @@ class ExpertWeightManager:
                                 # 通知消费者
                 self.not_empty.notify_all()
                 # 加载整层所有 experts
-                try:
-                    predict_experts_order=self.predict_experts_order(target_layer_id)
-                    for eid in predict_experts_order:
-                        self.not_empty.notify_all()
-                        if self.layer_expert_info_sorted[target_layer_id] :
-                            print("self.layer_expert_info_sorted[target_layer_id]!=None")
-                            # print(self.layer_expert_info_sorted[target_layer_id])
-                            for i, num_tokens in self.layer_expert_info_sorted[target_layer_id]:
-                                if self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==1:
-                                    print("有序跳过加载 ",target_layer_id,i)
-                                    continue
-                                self._load_expert_into_buffer(target_layer_id, i, w13_buf, w2_buf)
-                                print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
-                            break
-                        if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==1:
-                            print("跳过加载 ",target_layer_id,eid)
-                            continue
-                        self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
-                        print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
-                        
-                    # print(w13_buf,w2_buf)
-                except Exception as e:
-                    print(f"[Producer] Failed to load layer {target_layer_id}: {e}")
-                    # 加载失败，归还 buffer
-                    self.buffer_pool.append((w2_buf, w13_buf))
-                    time.sleep(0.5)
-                    continue
+            try:
+                predict_experts_order=self.predict_experts_order(target_layer_id)
+                for eid in predict_experts_order:
+                    # self.not_empty.notify_all()
+                    if self.layer_expert_info_sorted[target_layer_id] :
+                        print("self.layer_expert_info_sorted[target_layer_id]!=None")
+                        # print(self.layer_expert_info_sorted[target_layer_id])
+                        for i, num_tokens in self.layer_expert_info_sorted[target_layer_id]:
+                            if self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==1:
+                                print("有序跳过加载 ",target_layer_id,i)
+                                continue
+                            self._load_expert_into_buffer(target_layer_id, i, w13_buf, w2_buf)
+                            print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
+                        break
+                    if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==1:
+                        print("跳过加载 ",target_layer_id,eid)
+                        continue
+                    self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
+                    print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
+                    
+                # print(w13_buf,w2_buf)
+            except Exception as e:
+                print(f"[Producer] Failed to load layer {target_layer_id}: {e}")
+                # 加载失败，归还 buffer
+                self.buffer_pool.append((w2_buf, w13_buf))
+                time.sleep(0.5)
+                continue
 
                 
-                print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
+            print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
 
-                # 更新下一个要加载的 layer_id（循环）
-                self.layer_id_to_load = (self.layer_id_to_load + 1) % self.total_layers
+            # 更新下一个要加载的 layer_id（循环）
+            self.layer_id_to_load = (self.layer_id_to_load + 1) % self.total_layers
 
 
 
@@ -757,8 +757,8 @@ def cpu_fused_moe_torch(
         start=time.time()
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
-        print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
-        print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
+        # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
+        # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
@@ -779,8 +779,8 @@ def cpu_fused_moe_torch(
         start=time.time()
         layer.w2_weight[i]=w2_buf[i]
         layer.w13_weight[i]=w13_buf[i] 
-        print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
-        print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
+        # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
+        # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
@@ -801,7 +801,10 @@ def cpu_fused_moe_torch(
         if num_tokens == 0:
             continue
         outputs.append(outputs_t[i])
+    start=time.time()
     manager.release_current_layer()
+    elapsed_ms = (time.time() - start) * 1000
+    print(f"[manager.release_current_layer() {elapsed_ms:.2f} ms")
     manager.layer_expert_info_sorted[rank]=None
     outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
     new_x = torch.empty_like(outs)

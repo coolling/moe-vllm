@@ -126,9 +126,9 @@ def process_all_experts(
 # 使用示例
 if __name__ == "__main__":
     # 1. 预处理：将w1和w3合并为w13
-    base_dir = "/sharenvme/usershome/cyl/test/model/Isotonic/smol_llama-4x220M-MoE"  # 修改为你的模型目录
-    num_layers = 10  # 修改为你的MoE层数
-    num_experts_per_layer = 4 # 修改为每层expert数
+    base_dir = "/sharenvme/usershome/cyl/test/model/mistralai/Mixtral-8x7B-Instruct-v0.1"  # 修改为你的模型目录
+    num_layers = 32  # 修改为你的MoE层数
+    num_experts_per_layer = 8 # 修改为每层expert数
     
     # 处理所有experts（不删除原始文件）
     process_all_experts(
