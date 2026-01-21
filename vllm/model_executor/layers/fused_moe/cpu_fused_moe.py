@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 from torch.nn import functional as F
 import time
-from collections import defaultdict, deque
+from collections import defaultdict, deque,Counter
 import threading
 import json
 import os
@@ -140,7 +140,8 @@ class ExpertWeightManager:
 
         # 加载状态跟踪
         self._EXPERT_WEIGHT_LOADED = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
-        self.layer_expert_info_sorted = defaultdict(dict)
+        self.layer_expert_info_sorted = defaultdict(dict) #当前层专家激活数量
+        self.layer_expert_in_request = defaultdict(Counter) #当前请求内累计的每层专家激活结果
         # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
         self.buffer_pool = []
         for _ in range(max_size):
@@ -169,11 +170,25 @@ class ExpertWeightManager:
             name="MoEWeightProducer"
         )
         self.producer_thread.start()
-    def predict_experts_order(self,rank):
+        
+    def predict_next_token_by_request_info(self,rank):
         re=[]
+        topk=2
+        expert_counter = self.layer_expert_in_request[rank]
+            
+        for expert, count in expert_counter.most_common():
+            re.append(expert)
+            if len(re)>=topk:
+                break
+        print("predict_next_token_by_request_info,rank:",rank,re)
+        return re
+    def predict_experts_order(self,rank):
+        # re=[]
+        re=self.predict_next_token_by_request_info(rank)
         if self.analyzer.get_rank_distribution(rank):
             for exp_info in self.analyzer.get_rank_distribution(rank)['distribution']:
-                re.append(exp_info['expert'])
+                if exp_info['expert'] not in re:
+                    re.append(exp_info['expert'])
             print(re)
         for i in range(self.num_experts):
             if i not in re:
@@ -202,12 +217,12 @@ class ExpertWeightManager:
         elapsed_ms = (time.time() - start) * 1000
         # print(w2_t)
         # print(w13_t)
-        print(f"[DEBUG3] time1 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG4] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         fast_copy(w2_buf[expert_id], w2_t)
         fast_copy(w13_buf[expert_id], w13_t)
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG3] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG4] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
@@ -798,6 +813,7 @@ def cpu_fused_moe_torch(
         
     # 聚合专家计算结果
     for i, num_tokens in enumerate(tokens_per_expert):
+        manager.layer_expert_in_request[rank][i]+=num_tokens
         if num_tokens == 0:
             continue
         outputs.append(outputs_t[i])

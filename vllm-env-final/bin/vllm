@@ -1,10 +1,10 @@
 #!/sharenvme/usershome/cyl/test/vllm/vllm-env-final/bin/python
-# EASY-INSTALL-ENTRY-SCRIPT: 'vllm==0.1.dev19+g38784cc09.d20260121.cpu','console_scripts','vllm'
+# EASY-INSTALL-ENTRY-SCRIPT: 'vllm==0.1.dev20+g47dad35bf.d20260121.cpu','console_scripts','vllm'
 import re
 import sys
 
 # for compatibility with easy_install; see #2198
-__requires__ = 'vllm==0.1.dev19+g38784cc09.d20260121.cpu'
+__requires__ = 'vllm==0.1.dev20+g47dad35bf.d20260121.cpu'
 
 try:
     from importlib.metadata import distribution
@@ -30,4 +30,4 @@ globals().setdefault('load_entry_point', importlib_load_entry_point)
 
 if __name__ == '__main__':
     sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0])
-    sys.exit(load_entry_point('vllm==0.1.dev19+g38784cc09.d20260121.cpu', 'console_scripts', 'vllm')())
+    sys.exit(load_entry_point('vllm==0.1.dev20+g47dad35bf.d20260121.cpu', 'console_scripts', 'vllm')())
