@@ -234,7 +234,7 @@ class MixtralAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-
+import time
 class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -277,6 +277,8 @@ class MixtralDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
+        start=time.time()
+        print("attention cmp start")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -289,7 +291,16 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        print("attention cmp end")
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"attention cmp {elapsed_ms:.2f} ms")
+        
+        start=time.time()
+        print("moe cmp end")
         hidden_states = self.block_sparse_moe(hidden_states)
+        print("moe cmp end")
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"moe cmp {elapsed_ms:.2f} ms")
         return hidden_states, residual
 
 

@@ -25,9 +25,8 @@ _CPU_MOE_ACT = {
 # coolling ==========================
 infer_c=0
 
-
-class RankExpertAnalyzer:
-    """Rank-Expert分布分析器"""
+class RouteExpertAnalyzer:
+    """Route-Expert分布分析器"""
     
     def __init__(self, json_file_path: str):
         """
@@ -37,6 +36,66 @@ class RankExpertAnalyzer:
             json_file_path: JSON文件路径
         """
         self.file_path = json_file_path
+
+        self.route_distributions = None
+        
+        # 加载数据
+        self.load_data()
+    
+    def load_data(self) -> bool:
+        """
+        加载JSON数据
+        
+        Returns:
+            成功加载返回True，否则返回False
+        """
+        try:
+            if not os.path.exists(self.file_path):
+                print(f"错误: 文件不存在 - {self.file_path}")
+                return False
+            
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # 提取主要部分
+       
+            self.route_distributions = data
+
+            return True
+            
+        except json.JSONDecodeError as e:
+            print(f"错误: JSON文件格式错误 - {e}")
+            return False
+        except Exception as e:
+            print(f"错误: 加载文件失败 - {e}")
+            return False
+
+    
+    def get_route_distribution(self, key) -> Optional[Dict[str, Any]]:
+        re=[]
+        key_str = str(key)
+        topk=2
+        if self.route_distributions:
+            if key_str in self.route_distributions:
+                # print(self.route_distributions[key_str])
+                for key in self.route_distributions[key_str]:
+                    re.append(int(key))
+                    if len(re)>=topk:
+                        break
+        print("get_route_distribution",key_str,re)
+        return re
+    
+class RankExpertAnalyzer:
+    """Rank-Expert分布分析器"""
+    
+    def __init__(self, rank_experts_file_path: str):
+        """
+        初始化分析器
+        
+        Args:
+            rank_experts_file_path: JSON文件路径
+        """
+        self.file_path = rank_experts_file_path
 
         self.rank_distributions = None
         
@@ -127,12 +186,25 @@ class ExpertWeightManager:
     ):
         self.num_experts = num_experts
         self.weight_file = GLOBAL_HF_WEIGHTS_FILE
-        json_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/rank_experts_distribution.json"
-        if not os.path.exists(json_file):
-            print(f"文件 {json_file} 不存在")
+        
+        # ========================= 创建热门专家分析器 ========================
+        rank_experts_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/rank_experts_distribution.json"
+        if not os.path.exists(rank_experts_file):
+            print(f"文件 {rank_experts_file} 不存在")
         
         # 创建分析器
-        self.analyzer = RankExpertAnalyzer(json_file)
+        self.analyzer = RankExpertAnalyzer(rank_experts_file)
+        # =================================================================
+        
+        # ========================= 创建route分析器 ========================
+        route_experts_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/route_experts_distribution.json"
+        if not os.path.exists(route_experts_file):
+            print(f"文件 {route_experts_file} 不存在")
+        
+        self.analyzer_route = RouteExpertAnalyzer(route_experts_file)
+        self.tuples=defaultdict(dict)
+        # =================================================================
+        
         # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
         self.global_w13_tensor = torch.empty_like(w13)
         # print("init",self.global_w13_tensor.data_ptr())
@@ -170,6 +242,10 @@ class ExpertWeightManager:
             name="MoEWeightProducer"
         )
         self.producer_thread.start()
+    
+    def add_route(self,rank,rank_tuple):
+        self.tuples[rank]=rank_tuple
+
         
     def predict_next_token_by_request_info(self,rank):
         re=[]
@@ -185,8 +261,14 @@ class ExpertWeightManager:
     def predict_experts_order(self,rank):
         # re=[]
         re=self.predict_next_token_by_request_info(rank)
-        if self.analyzer.get_rank_distribution(rank):
-            for exp_info in self.analyzer.get_rank_distribution(rank)['distribution']:
+        if rank>=2:
+            # coolling todo
+            key=(rank-2, self.tuples[rank-2], rank-1, self.tuples[rank-1])
+            print(key)
+            re.extend(self.analyzer_route.get_route_distribution(key))
+        rank_distribution=self.analyzer.get_rank_distribution(rank)
+        if rank_distribution:
+            for exp_info in rank_distribution['distribution']:
                 if exp_info['expert'] not in re:
                     re.append(exp_info['expert'])
             print(re)
@@ -231,6 +313,7 @@ class ExpertWeightManager:
         global infer_c
         """后台生产者线程：循环预加载下一层权重"""
         while not self._shutdown.is_set():
+            start=time.time()
             if self.total_layers == 0 or infer_c==0:
                 time.sleep(0.1)
                 continue
@@ -238,12 +321,11 @@ class ExpertWeightManager:
             with self.lock:
                 # 等待队列未满
                 while len(self.queue) >= self.max_size and not self._shutdown.is_set():
-                    self.not_full.wait(timeout=1.0)
+                    self.not_full.wait(timeout=0.01)
+                    # time.sleep(0.01)
 
                 if self._shutdown.is_set():
                     break
-
-
 
                 w2_buf, w13_buf = self.buffer_pool.pop()
                 target_layer_id = self.layer_id_to_load
@@ -252,8 +334,13 @@ class ExpertWeightManager:
                                 # 通知消费者
                 self.not_empty.notify_all()
                 # 加载整层所有 experts
+            elapsed_ms = (time.time() - start) * 1000
+            print(f"wait to load {elapsed_ms:.2f} ms")
             try:
+                start=time.time()
                 predict_experts_order=self.predict_experts_order(target_layer_id)
+                elapsed_ms = (time.time() - start) * 1000
+                print(f"predict_experts_order: {elapsed_ms:.2f} ms")
                 for eid in predict_experts_order:
                     # self.not_empty.notify_all()
                     if self.layer_expert_info_sorted[target_layer_id] :
@@ -289,18 +376,18 @@ class ExpertWeightManager:
 
 
             # 控制加载节奏（避免 CPU 占满）
-            time.sleep(0.01)
+            # time.sleep(0.01)
 
     def acquire_weights_for_layer(self,layer, expected_layer_id: int) -> bool:
         """
         消费者调用：等待并绑定队列头部的 buffer 到 global_tensor。
         返回 True 表示成功，False 表示已关闭。
         """
-        # with self.not_empty:
+        with self.not_empty:
             
-        while len(self.queue) == 0 and not self._shutdown.is_set():
-            time.sleep(0.01)
-            # self.not_empty.wait(timeout=0.01)
+            while len(self.queue) == 0 and not self._shutdown.is_set():
+                # time.sleep(0.01)
+                self.not_empty.wait(timeout=0.01)
 
         if self._shutdown.is_set():
             return False
@@ -742,6 +829,7 @@ def cpu_fused_moe_torch(
     start_idx = 0 #每个专家对应的开始token
     start_idxs=[0]*len_experts #每个专家对应的结束token
     end_idxs=[0]*len_experts
+    tuple_now=[]
     for i, num_tokens in enumerate(tokens_per_expert):
         end_idx = start_idx + num_tokens
         start_idxs[i]=start_idx
@@ -750,6 +838,8 @@ def cpu_fused_moe_torch(
         if num_tokens == 0:
             print("设置跳过加载 ",rank,i)
             manager.set_load_state(rank,i,-1)
+        else:
+            tuple_now.append(i)
     # ===================================================
     
     # =================确保该层已经开始加载=================
@@ -759,6 +849,7 @@ def cpu_fused_moe_torch(
         time.sleep(0)
     _, w2_buf, w13_buf=manager.queue[0]
     print("获取了",rank,"层")
+    manager.add_route(rank,tuple(tuple_now))
     #===================================================
     
     # ==========如果有已经加载了的专家可以先计算==============

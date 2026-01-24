@@ -20,8 +20,9 @@ url = "http://localhost:8000/v1/chat/completions"
 payload = {
     "model": "/sharenvme/usershome/cyl/test/model/mistralai/Mixtral-8x7B-Instruct-v0.1",
     "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 1,
+    "max_tokens": 20,
     "temperature": 0,
+    "top_p": 1, 
     "chat_template": "{% for message in messages %}{% if message['role'] == 'user' %}<s>[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"
 }
 
