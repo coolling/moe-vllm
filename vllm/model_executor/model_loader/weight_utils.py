@@ -768,33 +768,76 @@ def load_expert_weight(
 import threading
 import io
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 
-def load_expert_weight_par(
-    hf_weights_files: list[str],
-    weight_name: str = "",
-    expert_dim: int = 256,
-    parallel_loading: bool = True,
-    max_workers: int = None,
-    chunk_size_mb: int = 4
-):
-    """加载专家权重（支持并行读取文件到内存）
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import struct
+from safetensors.torch import load_file
+from safetensors import safe_open
+import posix
+import ctypes
+def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size_mb=1):
+    """并行读取并解析safetensors文件"""
+    # 第一步：先读取文件头（单独线程）
+    print("读取safetensors文件头...")
+    start=time.time()
+    # safetensors文件格式：前8字节是header长度，然后是json header，最后是tensor数据
+    with open(file_path, "rb") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            # 读取header长度（8字节，little-endian）
+            header_len_bytes = f.read(8)
+            if len(header_len_bytes) != 8:
+                raise ValueError("文件太小或格式错误")
+            
+            header_len = struct.unpack("<Q", header_len_bytes)[0]
+            
+            # 读取header JSON
+            header_bytes = f.read(header_len)
+            if len(header_bytes) != header_len:
+                raise ValueError("header长度不匹配")
+            header = json.loads(header_bytes.decode('utf-8'))          
+            # 获取文件总大小和tensor数据位置
+            data_start_pos = 8 + header_len  # 数据开始位置
+   
+            tensor_info = None
+            for key, info in header.items():
+                if key == weight_name:
+                    tensor_info = info
+                    break
+            # 获取tensor的数据范围
+            dtype = tensor_info["dtype"]
+            shape = tensor_info["shape"]
+            data_offsets = tensor_info["data_offsets"]
+            tensor_start = data_start_pos + data_offsets[0]
+            tensor_end = data_start_pos + data_offsets[1]
+            tensor_size = tensor_end - tensor_start
+            
+            print(f"目标tensor: {weight_name}")
+            print(f"  位置: {tensor_start}-{tensor_end} (大小: {tensor_size} 字节)")
+            print(f"  形状: {shape}, 类型: {dtype}")
+            
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     
-    每个线程读取文件的不同部分到内存，然后在内存中合并
-    """
-    import re
-    import os
-    import gc
-    import tempfile
-    import fcntl
-    import struct
-    import torch
-    from safetensors.torch import load_file
-    from safetensors import safe_open
+    elapsed_ms = (time.time() - start) * 1000
     
-    def sanitize_filename(name: str) -> str:
-        return re.sub(r'[\\/:*?"<>|]', '_', name)
+    print(f"[DEBUG] 读取safetensors文件头 {elapsed_ms:.2f} ms")
+    # 第二步：并行读取tensor数据
+    start=time.time()
+    print(f"并行读取tensor数据 ({tensor_size/1024/1024:.2f} MB)...")
+    
+    # 计算需要的线程数和块大小
+    if max_workers is None:
+        cpu_count = os.cpu_count() or 4
+        max_workers = min(8, cpu_count * 2)
+    
+    # 计算每个线程读取的块
+    chunk_size = chunk_size_mb * 1024 * 1024
+    num_chunks = math.ceil(tensor_size / chunk_size)
+    
+    # 限制线程数不超过块数
+    actual_workers = min(max_workers, num_chunks)
     
     def read_file_chunk_to_memory(file_path, start_pos, chunk_size, worker_id):
         """读取文件的指定块到内存"""
@@ -804,293 +847,116 @@ def load_expert_weight_par(
                 try:
                     f.seek(start_pos)
                     data = f.read(chunk_size)
+                    # posix.posix_fadvise(f.fileno(), start_pos, chunk_size, 
+                    #                posix.POSIX_FADV_DONTNEED)
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             
             return worker_id, data, len(data), None
         except Exception as e:
             return worker_id, None, 0, str(e)
-    
-    def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size_mb=10):
-        """并行读取并解析safetensors文件"""
-        # 第一步：先读取文件头（单独线程）
-        print("读取safetensors文件头...")
+    # 创建线程池
+    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+        futures = []
         
-        # safetensors文件格式：前8字节是header长度，然后是json header，最后是tensor数据
-        with open(file_path, "rb") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-            try:
-                # 读取header长度（8字节，little-endian）
-                header_len_bytes = f.read(8)
-                if len(header_len_bytes) != 8:
-                    raise ValueError("文件太小或格式错误")
-                
-                header_len = struct.unpack("<Q", header_len_bytes)[0]
-                
-                # 读取header JSON
-                header_bytes = f.read(header_len)
-                if len(header_bytes) != header_len:
-                    raise ValueError("header长度不匹配")
-                
-                import json
-                header = json.loads(header_bytes.decode('utf-8'))
-                
-                # 获取文件总大小和tensor数据位置
-                total_size = os.path.getsize(file_path)
-                data_start_pos = 8 + header_len  # 数据开始位置
-                
-                # 查找目标tensor的信息
-                if "__metadata__" in header:
-                    metadata = header["__metadata__"]
-                    del header["__metadata__"]
-                
-                tensor_info = None
-                for key, info in header.items():
-                    if key == weight_name:
-                        tensor_info = info
-                        break
-                
-                if not tensor_info:
-                    return None, list(header.keys())
-                
-                # 获取tensor的数据范围
-                dtype = tensor_info["dtype"]
-                shape = tensor_info["shape"]
-                data_offsets = tensor_info["data_offsets"]
-                tensor_start = data_start_pos + data_offsets[0]
-                tensor_end = data_start_pos + data_offsets[1]
-                tensor_size = tensor_end - tensor_start
-                
-                print(f"目标tensor: {weight_name}")
-                print(f"  位置: {tensor_start}-{tensor_end} (大小: {tensor_size} 字节)")
-                print(f"  形状: {shape}, 类型: {dtype}")
-                
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        
-        # 第二步：并行读取tensor数据
-        print(f"并行读取tensor数据 ({tensor_size/1024/1024:.2f} MB)...")
-        
-        # 计算需要的线程数和块大小
-        if max_workers is None:
-            cpu_count = os.cpu_count() or 4
-            max_workers = min(8, cpu_count * 2)
-        
-        # 计算每个线程读取的块
-        chunk_size = chunk_size_mb * 1024 * 1024
-        num_chunks = math.ceil(tensor_size / chunk_size)
-        
-        # 限制线程数不超过块数
-        actual_workers = min(max_workers, num_chunks)
-        
-        # 创建线程池
-        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-            futures = []
+        # 提交所有数据块读取任务
+        for i in range(num_chunks):
+            chunk_start = tensor_start + i * chunk_size
+            actual_chunk_size = min(chunk_size, tensor_end - chunk_start)
             
-            # 提交所有数据块读取任务
-            for i in range(num_chunks):
-                chunk_start = tensor_start + i * chunk_size
-                actual_chunk_size = min(chunk_size, tensor_end - chunk_start)
-                
-                future = executor.submit(
-                    read_file_chunk_to_memory,
-                    file_path,
-                    chunk_start,
-                    actual_chunk_size,
-                    i
-                )
-                futures.append(future)
+            future = executor.submit(
+                read_file_chunk_to_memory,
+                file_path,
+                chunk_start,
+                actual_chunk_size,
+                i
+            )
+            futures.append(future)
+        # 收集所有数据块
+        chunks = [None] * num_chunks
+        errors = []
+        for future in as_completed(futures):
+            worker_id, data, size, error = future.result()
             
-            # 收集所有数据块
-            chunks = [None] * num_chunks
-            total_read = 0
-            errors = []
-            
-            for future in as_completed(futures):
-                worker_id, data, size, error = future.result()
-                
-                if error:
-                    errors.append(f"块 {worker_id}: {error}")
-                elif data:
-                    chunks[worker_id] = data
-                    total_read += size
-                    
-                    progress = total_read / tensor_size * 100
-                    print(f"数据读取进度: {progress:.1f}% ({total_read/1024/1024:.2f}/{tensor_size/1024/1024:.2f} MB)")
-            
-            if errors:
-                print(f"读取错误: {errors}")
-                return None, []
+            if error:
+                errors.append(f"块 {worker_id}: {error}")
+            elif data:
+                chunks[worker_id] = data
+           
+
         
-        # 第三步：合并数据并创建tensor
-        print("合并数据并创建tensor...")
-        
-        # 合并所有数据块
-        combined_data = b''.join(chunks)
-        
-        if len(combined_data) != tensor_size:
-            print(f"数据大小不匹配: 期望 {tensor_size}, 实际 {len(combined_data)}")
+        if errors:
+            print(f"读取错误: {errors}")
             return None, []
-        
-        # 将字节数据转换为torch tensor
-        import numpy as np
-        
-        # 根据dtype创建numpy数组
-        dtype_map = {
-            "F16": np.float16,
-            "BF16": np.float16,  # 注意：numpy没有bfloat16，需要特殊处理
-            "F32": np.float32,
-            "F64": np.float64,
-            "I8": np.int8,
-            "I16": np.int16,
-            "I32": np.int32,
-            "I64": np.int64,
-            "U8": np.uint8,
-            "BOOL": bool,
-        }
-        
-        if dtype not in dtype_map:
-            print(f"不支持的数据类型: {dtype}")
-            return None, []
-        
-        np_dtype = dtype_map[dtype]
-        
-        # 将字节数据转换为numpy数组
-        if dtype == "BF16":
-            # bfloat16特殊处理：先读为uint16，然后转换
-            import torch
-            uint16_data = np.frombuffer(combined_data, dtype=np.uint16)
-            # 使用torch的bfloat16支持
-            tensor = torch.frombuffer(combined_data, dtype=torch.bfloat16).reshape(shape)
-        else:
-            # 其他数据类型
-            np_array = np.frombuffer(combined_data, dtype=np_dtype).reshape(shape)
-            tensor = torch.from_numpy(np_array).clone()
-        
-        # 确保在CPU上
-        tensor = tensor.cpu().contiguous()
-        
-        return tensor, list(header.keys())
     
-    def load_single_file_without_cache(file_path, weight_name):
-        """传统方式加载文件（无缓存）"""
-        tmp_fd, tmp_file_path = tempfile.mkstemp(suffix=".safetensors")
-        os.close(tmp_fd)
-        
-        try:
-            # 复制文件
-            with open(file_path, "rb") as src_f:
-                fcntl.flock(src_f.fileno(), fcntl.LOCK_EX)
-                try:
-                    with open(tmp_file_path, "wb") as dst_f:
-                        os.fdatasync(dst_f.fileno())
-                        # 大块复制提高速度
-                        while True:
-                            data = src_f.read(1024 * 1024)  # 1MB
-                            if not data:
-                                break
-                            dst_f.write(data)
-                finally:
-                    fcntl.flock(src_f.fileno(), fcntl.LOCK_UN)
-            
-            # 设置环境变量
-            os.environ["SAFETENSORS_DISABLE_MEMORY_MAPPING"] = "1"
-            os.environ["SAFETENSORS_CACHE_DISABLE"] = "1"
-            os.environ["SAFETENSORS_FORCE_DISK_READ"] = "1"
-            
-            # 清除缓存
-            try:
-                os.system(f"posix_fadvise {tmp_file_path} 0 0 POSIX_FADV_DONTNEED 2>/dev/null")
-            except:
-                pass
-            
-            # 加载文件
-            tensor_dict = load_file(tmp_file_path, device="cpu")
-            tensor = tensor_dict.get(weight_name, None)
-            
-            return tensor, list(tensor_dict.keys()) if tensor_dict else []
-            
-        finally:
-            try:
-                os.unlink(tmp_file_path)
-            except:
-                pass
+    # 第三步：合并数据并创建tensor
+    print("合并数据并创建tensor...")
+    elapsed_ms = (time.time() - start) * 1000
+    print(f"[DEBUG] 读取数据 {elapsed_ms:.2f} ms")
+    start=time.time()
+    # 合并所有数据块
+    # combined_data=bytearray(tensor_size)
     
-    # 清空缓存
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch._C._emptyCUDAIPCCache()
+    offset = 0
+    return chunks
+    
+    
+def load_expert_weight_par(
+    hf_weights_files: list[str],
+    weight_name: str,
+    combined_data,
+    expert_dim: int = 256,
+    parallel_loading: bool = True,
+    max_workers: int = None,
+    chunk_size_mb: int = 4
+):
+    """加载专家权重（支持并行读取文件到内存）
+    
+    每个线程读取文件的不同部分到内存，然后在内存中合并
+    """
     
     # 查找目标文件
     target_file = None
-    for st_file in hf_weights_files:
-        st_file_dir = os.path.dirname(st_file)
-        experts_dir = os.path.join(st_file_dir, "experts")
-        safe_name = sanitize_filename(weight_name)
-        possible_file = os.path.join(experts_dir, f"{safe_name}.safetensors")
-        
-        if os.path.exists(possible_file):
-            target_file = possible_file
-            print(f"找到目标文件: {target_file}")
-            break
+    st_file = hf_weights_files[0]
+    st_file_dir = os.path.dirname(st_file)
+    experts_dir = os.path.join(st_file_dir, "experts")
+    safe_name = weight_name
+    possible_file = os.path.join(experts_dir, f"{safe_name}.safetensors")
     
+    if os.path.exists(possible_file):
+        target_file = possible_file
+        print(f"找到目标文件: {target_file}")
+
     if target_file is None:
         print(f"权重 {weight_name} 未找到")
         return None
-    
-    # 检查文件大小
+
     try:
-        file_size = os.path.getsize(target_file)
-        file_size_mb = file_size / (1024 * 1024)
-        print(f"文件大小: {file_size_mb:.2f} MB")
-    except:
-        file_size_mb = 0
-    
-    # 决定使用哪种加载方式
-    use_parallel = True#parallel_loading and file_size_mb > 50
-    
-    try:
-        if use_parallel:
-            print("使用并行内存读取模式...")
-            tensor, all_keys = parallel_read_and_parse(
+        start=time.time()
+        chunks = parallel_read_and_parse(
                 target_file,
                 weight_name,
                 max_workers=max_workers,
                 chunk_size_mb=chunk_size_mb
             )
-        else:
-            print("使用传统文件复制模式...")
-            tensor, all_keys = load_single_file_without_cache(target_file, weight_name)
-        
-        if tensor is None:
-            print(f"文件内无目标权重 {weight_name}")
-            if all_keys:
-                print(f"可用权重: {all_keys[:10]}{'...' if len(all_keys) > 10 else ''}")
-            return None
-        
-        print(f"\n=== 加载成功 ===")
-        print(f"权重名: {weight_name}")
-        print(f"文件: {os.path.basename(target_file)}")
-        print(f"形状: {tensor.shape}")
-        print(f"类型: {tensor.dtype}")
-        print(f"模式: {'并行内存读取' if use_parallel else '传统文件复制'}")
-        print(f"文件大小: {file_size_mb:.2f} MB")
-        
-        # 确保张量独立
-        final_tensor = tensor.clone().detach().cpu().contiguous()
-        del tensor
-        gc.collect()
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        return final_tensor
+      
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG] parallel_read_and_parse {elapsed_ms:.2f} ms")
+        start=time.time()
+        offset=0
+        mv = memoryview(combined_data)
+        for chunk in chunks:
+            mv[offset:offset + len(chunk)] = chunk
+            offset += len(chunk)
+
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG] 合并所有数据块 {elapsed_ms:.2f} ms")
+        # return tensor
+    
         
     except Exception as e:
         print(f"加载失败: {e}")
-        import traceback
-        traceback.print_exc()
+        
         return None
 def safetensors_weights_iterator(
     hf_weights_files: list[str],

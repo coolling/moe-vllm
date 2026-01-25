@@ -9,6 +9,7 @@ from collections import defaultdict, deque,Counter
 import threading
 import json
 import os
+import numpy as np
 from typing import Dict, List, Any, Optional
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
-from vllm.model_executor.model_loader.weight_utils import load_expert_weight,load_expert_weight_safeopen
+from vllm.model_executor.model_loader.weight_utils import load_expert_weight,load_expert_weight_safeopen,load_expert_weight_par
 _CPU_MOE_LAYER_CACHE = {}
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
@@ -24,7 +25,10 @@ _CPU_MOE_ACT = {
 }
 # coolling ==========================
 infer_c=0
-
+def parse_to_tensor(combined_data,shape):
+    uint16_data = np.frombuffer(combined_data, dtype=np.uint16)
+    tensor = torch.frombuffer(combined_data, dtype=torch.bfloat16).reshape(shape)
+    return tensor
 class RouteExpertAnalyzer:
     """Route-Expert分布分析器"""
     
@@ -209,7 +213,7 @@ class ExpertWeightManager:
         self.global_w13_tensor = torch.empty_like(w13)
         # print("init",self.global_w13_tensor.data_ptr())
         self.global_w2_tensor = torch.empty_like(w2)
-
+        print(self.global_w13_tensor.shape)
         # 加载状态跟踪
         self._EXPERT_WEIGHT_LOADED = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
         self.layer_expert_info_sorted = defaultdict(dict) #当前层专家激活数量
@@ -217,8 +221,11 @@ class ExpertWeightManager:
         # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
         self.buffer_pool = []
         for _ in range(max_size):
-            w2_buf = torch.empty_like(w2)
-            w13_buf = torch.empty_like(w13)
+            print("!")
+            # w2_buf = [None]*self.num_experts #torch.empty_like(w2)
+            # w13_buf = [None]*self.num_experts #torch.empty_like(w13)
+            w2_buf = [bytearray(self.global_w2_tensor.shape[1]*self.global_w2_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w2)
+            w13_buf = [bytearray(self.global_w13_tensor.shape[1]*self.global_w13_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w13)
             self.buffer_pool.append((w2_buf, w13_buf))
 
         # 生产者-消费者队列：每个元素为 (layer_id, w2_buf, w13_buf)
@@ -283,7 +290,7 @@ class ExpertWeightManager:
         """由外部调用，告知总共有多少 MoE 层（必须在推理开始前设置）"""
         self.total_layers = total_layers
 
-    def _load_expert_into_buffer(self, layer_id: int, expert_id: int, w13_buf: torch.Tensor, w2_buf: torch.Tensor):
+    def _load_expert_into_buffer(self, layer_id: int, expert_id: int, w13_buf, w2_buf):
         import time
         
         """将单个 expert 的权重加载到 buffer 的对应位置"""
@@ -293,18 +300,20 @@ class ExpertWeightManager:
         w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
         start = time.time()
         # 加载 w2
-        w2_t=load_expert_weight_safeopen(self.weight_file, w2_key)
-        w13_t=load_expert_weight_safeopen(self.weight_file, w13_key)
-   
+        load_expert_weight_par(self.weight_file, w2_key,w2_buf[expert_id])
+        load_expert_weight_par(self.weight_file, w13_key,w13_buf[expert_id])
+        
         elapsed_ms = (time.time() - start) * 1000
         # print(w2_t)
         # print(w13_t)
-        print(f"[DEBUG4] time1 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
         start = time.time()
-        fast_copy(w2_buf[expert_id], w2_t)
-        fast_copy(w13_buf[expert_id], w13_t)
+        # w2_buf[expert_id]=(w2_t)
+        # w13_buf[expert_id]=(w13_t)
+        # fast_copy(self.global_w2_tensor[expert_id],w2_buf[expert_id])
+        # fast_copy(self.global_w13_tensor[expert_id],w13_buf[expert_id])
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG4] time2 {elapsed_ms:.2f} ms")
+        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
@@ -685,8 +694,10 @@ class CPUFusedMOE:
         global manager
         
         use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
+        print("use_onednn_mm",use_onednn_mm)
         num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
+        print("has_w13_bias",has_w13_bias)
         has_w2_bias = hasattr(layer, "w2_bias")
         if manager == None:
             manager = ExpertWeightManager(
@@ -850,6 +861,8 @@ def cpu_fused_moe_torch(
     _, w2_buf, w13_buf=manager.queue[0]
     print("获取了",rank,"层")
     manager.add_route(rank,tuple(tuple_now))
+    # layer.w13_weight=(w13_buf)
+    # layer.w2_weight=(w2_buf)
     #===================================================
     
     # ==========如果有已经加载了的专家可以先计算==============
@@ -860,18 +873,29 @@ def cpu_fused_moe_torch(
         print("已经加载完成的专家",i,"先计算")
         
         pre_comp.append(i)
+        
         start=time.time()
-        layer.w2_weight[i]=w2_buf[i]
-        layer.w13_weight[i]=w13_buf[i] 
+        # fast_copy(layer.w2_weight[i], w2_buf[i])
+        # fast_copy(layer.w13_weight[i], w13_buf[i])
+        # layer.w2_weight[i]=w2_buf[i]
+        # layer.w13_weight[i]=w13_buf[i] 
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG1] 先行计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
+        start=time.time()
         # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
         # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
+        w13_buf_t=parse_to_tensor(w13_buf[i],[manager.global_w13_tensor.shape[1],manager.global_w13_tensor.shape[2]])
+        w2_buf_t=parse_to_tensor(w2_buf[i],[manager.global_w2_tensor.shape[1],manager.global_w2_tensor.shape[2]])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
-        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
+        gate_up = F.linear(tokens_for_this_expert, w13_buf_t, None)
+        # gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
-        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        expert_out = F.linear(gate_up, w2_buf_t, None)
+        # expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs_t[i]=expert_out
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] 先行计算专家{rank}-{i} {elapsed_ms:.2f} ms")
+ 
+        print(f"[DEBUG1] 先行计算专家{rank}-{i} {elapsed_ms:.2f} ms")
     # ============================================================
     
     # ==========根据专家激活token数排序计算顺序==============
@@ -883,19 +907,26 @@ def cpu_fused_moe_torch(
             print("wait..")
             time.sleep(0.01)
         start=time.time()
-        layer.w2_weight[i]=w2_buf[i]
-        layer.w13_weight[i]=w13_buf[i] 
+        # fast_copy(layer.w2_weight[i], w2_buf[i])
+        # fast_copy(layer.w13_weight[i], w13_buf[i])
+        # layer.w2_weight[i]=w2_buf[i]
+        # layer.w13_weight[i]=w13_buf[i] 
+        elapsed_ms = (time.time() - start) * 1000
+        print(f"[DEBUG1] 计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
+        start=time.time()
         # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
         # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
+        w13_buf_t=parse_to_tensor(w13_buf[i],[manager.global_w13_tensor.shape[1],manager.global_w13_tensor.shape[2]])
+        w2_buf_t=parse_to_tensor(w2_buf[i],[manager.global_w2_tensor.shape[1],manager.global_w2_tensor.shape[2]])
         tokens_for_this_expert = sorted_tokens[start_idxs[i]:end_idxs[i]]
-        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
+        gate_up = F.linear(tokens_for_this_expert, w13_buf_t, None)
+        # gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
         gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
-        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        expert_out = F.linear(gate_up, w2_buf_t, None)
+        # expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs_t[i]=expert_out
-        
-        
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
+        print(f"[DEBUG1] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
     # ============================================================
   
         
