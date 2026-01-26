@@ -278,7 +278,7 @@ class MixtralDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         start=time.time()
-        print("attention cmp start")
+        # print("attention cmp start")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -291,16 +291,16 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        print("attention cmp end")
-        elapsed_ms = (time.time() - start) * 1000
-        print(f"attention cmp {elapsed_ms:.2f} ms")
+        # print("attention cmp end")
+        # elapsed_ms = (time.time() - start) * 1000
+        # print(f"attention cmp {elapsed_ms:.2f} ms")
         
-        start=time.time()
-        print("moe cmp end")
+        # start=time.time()
+        # print("moe cmp end")
         hidden_states = self.block_sparse_moe(hidden_states)
-        print("moe cmp end")
+        # print("moe cmp end")
         elapsed_ms = (time.time() - start) * 1000
-        print(f"moe cmp {elapsed_ms:.2f} ms")
+        print(f"cmp {elapsed_ms:.2f} ms")
         return hidden_states, residual
 
 
@@ -356,6 +356,7 @@ class MixtralModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # start =time.time()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -373,6 +374,8 @@ class MixtralModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        # elapsed_ms = (time.time() - start) * 1000
+        # print(f"model cmp {elapsed_ms:.2f} ms")
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

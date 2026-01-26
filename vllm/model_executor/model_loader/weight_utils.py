@@ -779,7 +779,7 @@ import ctypes
 def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size_mb=1):
     """并行读取并解析safetensors文件"""
     # 第一步：先读取文件头（单独线程）
-    print("读取safetensors文件头...")
+    # print("读取safetensors文件头...")
     start=time.time()
     # safetensors文件格式：前8字节是header长度，然后是json header，最后是tensor数据
     with open(file_path, "rb") as f:
@@ -813,9 +813,9 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
             tensor_end = data_start_pos + data_offsets[1]
             tensor_size = tensor_end - tensor_start
             
-            print(f"目标tensor: {weight_name}")
-            print(f"  位置: {tensor_start}-{tensor_end} (大小: {tensor_size} 字节)")
-            print(f"  形状: {shape}, 类型: {dtype}")
+            # print(f"目标tensor: {weight_name}")
+            # print(f"  位置: {tensor_start}-{tensor_end} (大小: {tensor_size} 字节)")
+            # print(f"  形状: {shape}, 类型: {dtype}")
             
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
@@ -825,7 +825,7 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
     print(f"[DEBUG] 读取safetensors文件头 {elapsed_ms:.2f} ms")
     # 第二步：并行读取tensor数据
     start=time.time()
-    print(f"并行读取tensor数据 ({tensor_size/1024/1024:.2f} MB)...")
+    # print(f"并行读取tensor数据 ({tensor_size/1024/1024:.2f} MB)...")
     
     # 计算需要的线程数和块大小
     if max_workers is None:
@@ -842,6 +842,7 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
     def read_file_chunk_to_memory(file_path, start_pos, chunk_size, worker_id):
         """读取文件的指定块到内存"""
         try:
+            start=time.time()
             with open(file_path, "rb") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # 共享锁，允许多个读取
                 try:
@@ -851,7 +852,8 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
                     #                posix.POSIX_FADV_DONTNEED)
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            
+            elapsed_ms = (time.time() - start) * 1000
+            print(f"[DEBUG] {worker_id} {elapsed_ms:.2f} ms")
             return worker_id, data, len(data), None
         except Exception as e:
             return worker_id, None, 0, str(e)
@@ -890,7 +892,7 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
             return None, []
     
     # 第三步：合并数据并创建tensor
-    print("合并数据并创建tensor...")
+    # print("合并数据并创建tensor...")
     elapsed_ms = (time.time() - start) * 1000
     print(f"[DEBUG] 读取数据 {elapsed_ms:.2f} ms")
     start=time.time()
@@ -899,16 +901,19 @@ def parallel_read_and_parse(file_path, weight_name, max_workers=None, chunk_size
     
     offset = 0
     return chunks
-    
-    
+from safetensors_reader import parallel_read_and_parse as _impl
+def parallel_read_and_parses(file_path, weight_name, max_workers=None, chunk_size_mb=1):
+   
+    mw = -1 if max_workers is None else max_workers
+    return _impl(file_path, weight_name, mw, chunk_size_mb)
 def load_expert_weight_par(
     hf_weights_files: list[str],
     weight_name: str,
-    combined_data,
+    # combined_data,
     expert_dim: int = 256,
     parallel_loading: bool = True,
     max_workers: int = None,
-    chunk_size_mb: int = 4
+    chunk_size_mb: int = 14
 ):
     """加载专家权重（支持并行读取文件到内存）
     
@@ -925,7 +930,7 @@ def load_expert_weight_par(
     
     if os.path.exists(possible_file):
         target_file = possible_file
-        print(f"找到目标文件: {target_file}")
+        # print(f"找到目标文件: {target_file}")
 
     if target_file is None:
         print(f"权重 {weight_name} 未找到")
@@ -933,7 +938,7 @@ def load_expert_weight_par(
 
     try:
         start=time.time()
-        chunks = parallel_read_and_parse(
+        chunks = parallel_read_and_parses(
                 target_file,
                 weight_name,
                 max_workers=max_workers,
@@ -941,18 +946,21 @@ def load_expert_weight_par(
             )
       
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] parallel_read_and_parse {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG1] parallel_read_and_parse {elapsed_ms:.2f} ms")
         start=time.time()
-        offset=0
-        mv = memoryview(combined_data)
-        for chunk in chunks:
-            mv[offset:offset + len(chunk)] = chunk
-            offset += len(chunk)
+        # mv = memoryview(combined_data)
+        chunks = memoryview(chunks)
+        # mv[0:len(chunks)] = chunks
+        # offset=0
+        # mv = memoryview(combined_data)
+        # for chunk in chunks:
+        #     mv[offset:offset + len(chunk)] = chunk
+        #     offset += len(chunk)
 
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] 合并所有数据块 {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG] 合并所有数据块 {elapsed_ms:.2f} ms")
         # return tensor
-    
+        return chunks
         
     except Exception as e:
         print(f"加载失败: {e}")

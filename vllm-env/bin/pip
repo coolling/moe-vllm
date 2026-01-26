@@ -1,4 +1,4 @@
-#!/sharenvme/usershome/cyl/test/vllm/vllm-env/bin/python3.10
+#!/mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/python3.10
 # -*- coding: utf-8 -*-
 import re
 import sys

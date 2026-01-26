@@ -1,4 +1,4 @@
-#!/sharenvme/usershome/cyl/test/vllm/vllm-env/bin/python
+#!/mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'mcp==1.26.0','console_scripts','mcp'
 import re
 import sys

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.layer_utils import replace_pa
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
 from vllm.model_executor.model_loader.weight_utils import load_expert_weight,load_expert_weight_safeopen,load_expert_weight_par
+import multiprocessing
 _CPU_MOE_LAYER_CACHE = {}
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
@@ -25,6 +26,7 @@ _CPU_MOE_ACT = {
 }
 # coolling ==========================
 infer_c=0
+
 def parse_to_tensor(combined_data,shape):
     uint16_data = np.frombuffer(combined_data, dtype=np.uint16)
     tensor = torch.frombuffer(combined_data, dtype=torch.bfloat16).reshape(shape)
@@ -86,7 +88,7 @@ class RouteExpertAnalyzer:
                     re.append(int(key))
                     if len(re)>=topk:
                         break
-        print("get_route_distribution",key_str,re)
+        # print("get_route_distribution",key_str,re)
         return re
     
 class RankExpertAnalyzer:
@@ -149,9 +151,10 @@ class RankExpertAnalyzer:
             分布信息字典，如果不存在则返回None
         """
         rank_str = str(rank)
-        if rank_str in self.rank_distributions:
-            # print(self.rank_distributions[rank_str])
-            return self.rank_distributions[rank_str]
+        if self.rank_distributions:
+            if rank_str in self.rank_distributions:
+                # print(self.rank_distributions[rank_str])
+                return self.rank_distributions[rank_str]
         return None
 def tensors_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     # 检查形状是否相同
@@ -183,12 +186,10 @@ def fast_copy(dst: torch.Tensor, src: torch.Tensor):
 class ExpertWeightManager:
     def __init__(
         self,
-        num_experts: int,
-        w13: torch.Tensor,
-        w2: torch.Tensor,
         max_size: int = 2,  # 队列最大容量（预加载层数）
     ):
-        self.num_experts = num_experts
+        self.max_size=max_size
+        self.is_init=False
         self.weight_file = GLOBAL_HF_WEIGHTS_FILE
         
         # ========================= 创建热门专家分析器 ========================
@@ -208,26 +209,6 @@ class ExpertWeightManager:
         self.analyzer_route = RouteExpertAnalyzer(route_experts_file)
         self.tuples=defaultdict(dict)
         # =================================================================
-        
-        # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
-        self.global_w13_tensor = torch.empty_like(w13)
-        # print("init",self.global_w13_tensor.data_ptr())
-        self.global_w2_tensor = torch.empty_like(w2)
-        print(self.global_w13_tensor.shape)
-        # 加载状态跟踪
-        self._EXPERT_WEIGHT_LOADED = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
-        self.layer_expert_info_sorted = defaultdict(dict) #当前层专家激活数量
-        self.layer_expert_in_request = defaultdict(Counter) #当前请求内累计的每层专家激活结果
-        # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
-        self.buffer_pool = []
-        for _ in range(max_size):
-            print("!")
-            # w2_buf = [None]*self.num_experts #torch.empty_like(w2)
-            # w13_buf = [None]*self.num_experts #torch.empty_like(w13)
-            w2_buf = [bytearray(self.global_w2_tensor.shape[1]*self.global_w2_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w2)
-            w13_buf = [bytearray(self.global_w13_tensor.shape[1]*self.global_w13_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w13)
-            self.buffer_pool.append((w2_buf, w13_buf))
-
         # 生产者-消费者队列：每个元素为 (layer_id, w2_buf, w13_buf)
         self.queue = deque()  # 使用 deque 更高效
         self.max_size = max_size
@@ -249,6 +230,37 @@ class ExpertWeightManager:
             name="MoEWeightProducer"
         )
         self.producer_thread.start()
+    def init_manager(
+        self,
+        num_experts: int,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+       
+    ):
+        self.is_init=True
+        self.num_experts = num_experts
+        
+        
+        # 当前用于计算的全局张量（由 consumer 绑定到队列头部）
+        self.global_w13_tensor = torch.empty_like(w13)
+        # print("init",self.global_w13_tensor.data_ptr())
+        self.global_w2_tensor = torch.empty_like(w2)
+        # print(self.global_w13_tensor.shape)
+        # 加载状态跟踪
+        self._EXPERT_WEIGHT_LOADED = defaultdict(dict) #-1无需加载 0未加载 1已加载 2高优加载
+        self.layer_expert_info_sorted = defaultdict(dict) #当前层专家激活数量
+        self.layer_expert_in_request = defaultdict(Counter) #当前请求内累计的每层专家激活结果
+        # 缓冲池：预先分配 max_size 个 (w2, w13) buffer
+        self.buffer_pool = []
+        for _ in range(self.max_size):
+            # print("!1")
+            w2_buf = [None]*self.num_experts #torch.empty_like(w2)
+            w13_buf = [None]*self.num_experts #torch.empty_like(w13)
+            # w2_buf = [bytearray(self.global_w2_tensor.shape[1]*self.global_w2_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w2)
+            # w13_buf = [bytearray(self.global_w13_tensor.shape[1]*self.global_w13_tensor.shape[2]*2)]*self.num_experts #torch.empty_like(w13)
+            self.buffer_pool.append((w2_buf, w13_buf))
+
+        
     
     def add_route(self,rank,rank_tuple):
         self.tuples[rank]=rank_tuple
@@ -263,7 +275,7 @@ class ExpertWeightManager:
             re.append(expert)
             if len(re)>=topk:
                 break
-        print("predict_next_token_by_request_info,rank:",rank,re)
+        # print("predict_next_token_by_request_info,rank:",rank,re)
         return re
     def predict_experts_order(self,rank):
         # re=[]
@@ -271,14 +283,14 @@ class ExpertWeightManager:
         if rank>=2:
             # coolling todo
             key=(rank-2, self.tuples[rank-2], rank-1, self.tuples[rank-1])
-            print(key)
+            # print(key)
             re.extend(self.analyzer_route.get_route_distribution(key))
         rank_distribution=self.analyzer.get_rank_distribution(rank)
         if rank_distribution:
             for exp_info in rank_distribution['distribution']:
                 if exp_info['expert'] not in re:
                     re.append(exp_info['expert'])
-            print(re)
+            # print(re)
         for i in range(self.num_experts):
             if i not in re:
                 re.append(i)
@@ -300,20 +312,20 @@ class ExpertWeightManager:
         w2_key = f"model.layers.{rank}.block_sparse_moe.experts.{expert_id}.w2.weight"
         start = time.time()
         # 加载 w2
-        load_expert_weight_par(self.weight_file, w2_key,w2_buf[expert_id])
-        load_expert_weight_par(self.weight_file, w13_key,w13_buf[expert_id])
+        w2_buf[expert_id]=load_expert_weight_par(self.weight_file, w2_key)
+        w13_buf[expert_id]=load_expert_weight_par(self.weight_file, w13_key)
         
         elapsed_ms = (time.time() - start) * 1000
         # print(w2_t)
         # print(w13_t)
-        print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG] time1 {elapsed_ms:.2f} ms")
         start = time.time()
         # w2_buf[expert_id]=(w2_t)
         # w13_buf[expert_id]=(w13_t)
         # fast_copy(self.global_w2_tensor[expert_id],w2_buf[expert_id])
         # fast_copy(self.global_w13_tensor[expert_id],w13_buf[expert_id])
         elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG] time2 {elapsed_ms:.2f} ms")
         self.set_load_state(layer_id,expert_id,1)
         # self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] = True
         
@@ -322,8 +334,8 @@ class ExpertWeightManager:
         global infer_c
         """后台生产者线程：循环预加载下一层权重"""
         while not self._shutdown.is_set():
-            start=time.time()
-            if self.total_layers == 0 or infer_c==0:
+            # start=time.time()
+            if self.total_layers <self.max_size+1 :
                 time.sleep(0.1)
                 continue
 
@@ -343,30 +355,30 @@ class ExpertWeightManager:
                                 # 通知消费者
                 self.not_empty.notify_all()
                 # 加载整层所有 experts
-            elapsed_ms = (time.time() - start) * 1000
-            print(f"wait to load {elapsed_ms:.2f} ms")
+            # elapsed_ms = (time.time() - start) * 1000
+            # print(f"wait to load {elapsed_ms:.2f} ms")
             try:
-                start=time.time()
+                # start=time.time()
                 predict_experts_order=self.predict_experts_order(target_layer_id)
-                elapsed_ms = (time.time() - start) * 1000
-                print(f"predict_experts_order: {elapsed_ms:.2f} ms")
+                # elapsed_ms = (time.time() - start) * 1000
+                # print(f"predict_experts_order: {elapsed_ms:.2f} ms")
                 for eid in predict_experts_order:
                     # self.not_empty.notify_all()
                     if self.layer_expert_info_sorted[target_layer_id] :
-                        print("self.layer_expert_info_sorted[target_layer_id]!=None")
+                        # print("self.layer_expert_info_sorted[target_layer_id]!=None")
                         # print(self.layer_expert_info_sorted[target_layer_id])
                         for i, num_tokens in self.layer_expert_info_sorted[target_layer_id]:
                             if self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][i]==1:
-                                print("有序跳过加载 ",target_layer_id,i)
+                                # print("有序跳过加载 ",target_layer_id,i)
                                 continue
                             self._load_expert_into_buffer(target_layer_id, i, w13_buf, w2_buf)
-                            print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
+                            # print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
                         break
                     if self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==-1 or self._EXPERT_WEIGHT_LOADED[target_layer_id][eid]==1:
-                        print("跳过加载 ",target_layer_id,eid)
+                        # print("跳过加载 ",target_layer_id,eid)
                         continue
                     self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
-                    print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
+                    # print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
                     
                 # print(w13_buf,w2_buf)
             except Exception as e:
@@ -377,7 +389,7 @@ class ExpertWeightManager:
                 continue
 
                 
-            print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
+            # print(f"[Producer] Loaded layer {target_layer_id} into queue (size={len(self.queue)})")
 
             # 更新下一个要加载的 layer_id（循环）
             self.layer_id_to_load = (self.layer_id_to_load + 1) % self.total_layers
@@ -411,7 +423,9 @@ class ExpertWeightManager:
                 self.buffer_pool.append((w2_buf, w13_buf))
                 for i in range(self.num_experts):
                     self.set_load_state(layer_id,i,0)
-                    # self._EXPERT_WEIGHT_LOADED[layer_id][i]=False
+                    w2_buf[i]=None
+                    w13_buf[i]=None
+                
                 self.not_full.notify()  
 
     def shutdown(self):
@@ -423,7 +437,7 @@ class ExpertWeightManager:
             self.not_empty.notify_all()
         self.producer_thread.join(timeout=2)
         
-manager=None
+manager=ExpertWeightManager()
 #==========================================
 def grouped_topk(
     hidden_states: torch.Tensor,
@@ -592,6 +606,7 @@ class SGLFusedMOE:
 class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
         print("coolling:CPUFusedMOE")
+        # run_test()
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
         # if use_grouped_gemm:
@@ -694,13 +709,13 @@ class CPUFusedMOE:
         global manager
         
         use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
-        print("use_onednn_mm",use_onednn_mm)
+        # print("use_onednn_mm",use_onednn_mm)
         num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
-        print("has_w13_bias",has_w13_bias)
+        # print("has_w13_bias",has_w13_bias)
         has_w2_bias = hasattr(layer, "w2_bias")
-        if manager == None:
-            manager = ExpertWeightManager(
+        if not manager.is_init:
+            manager.init_manager(
                 num_experts,
                 layer.w13_weight,layer.w2_weight
             )
@@ -812,14 +827,15 @@ def cpu_fused_moe_torch(
     # 获取 layer_id 在插入顺序中的 0-based 排名
     keys_in_order = list(_CPU_MOE_LAYER_CACHE.keys())
     rank = keys_in_order.index(layer_id)  # 0-based 
-    print("=== cpu_fused_moe_torch 参数详情 ===")
-    print(f"layer_id: {layer_id}")
-    print(f"rank: {rank}")
+    # print("=== cpu_fused_moe_torch 参数详情 ===")
+    # print(f"layer_id: {layer_id}")
+    # print(f"rank: {rank}")
     # print(f"global_num_experts: {global_num_experts}")
     # # 可选：打印部分数值（避免太多）
     # print(f"topk_ids (first 10): {topk_ids.flatten()[:10].tolist()}")
+    
+    # print("====================================\n")
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
-    print("====================================\n")
     # print(layer.w13_weight)
     
     len_experts = global_num_experts
@@ -847,19 +863,19 @@ def cpu_fused_moe_torch(
         end_idxs[i]=end_idx
         start_idx = end_idx
         if num_tokens == 0:
-            print("设置跳过加载 ",rank,i)
+            # print("设置跳过加载 ",rank,i)
             manager.set_load_state(rank,i,-1)
         else:
             tuple_now.append(i)
     # ===================================================
     
     # =================确保该层已经开始加载=================
-    print("将要获取",rank,"层",len(manager.queue))
+    # print("将要获取",rank,"层",len(manager.queue))
     while not manager.acquire_weights_for_layer(layer,rank):
-        print("wait load",rank)
+        # print("wait load",rank)
         time.sleep(0)
     _, w2_buf, w13_buf=manager.queue[0]
-    print("获取了",rank,"层")
+    # print("获取了",rank,"层")
     manager.add_route(rank,tuple(tuple_now))
     # layer.w13_weight=(w13_buf)
     # layer.w2_weight=(w2_buf)
@@ -870,18 +886,18 @@ def cpu_fused_moe_torch(
     for i, num_tokens in enumerate(tokens_per_expert):
         if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             continue
-        print("已经加载完成的专家",i,"先计算")
+        # print("已经加载完成的专家",i,"先计算")
         
         pre_comp.append(i)
         
-        start=time.time()
+        # start=time.time()
         # fast_copy(layer.w2_weight[i], w2_buf[i])
         # fast_copy(layer.w13_weight[i], w13_buf[i])
         # layer.w2_weight[i]=w2_buf[i]
         # layer.w13_weight[i]=w13_buf[i] 
-        elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] 先行计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
-        start=time.time()
+        # elapsed_ms = (time.time() - start) * 1000
+        # print(f"[DEBUG1] 先行计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
+        # start=time.time()
         # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
         # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
         w13_buf_t=parse_to_tensor(w13_buf[i],[manager.global_w13_tensor.shape[1],manager.global_w13_tensor.shape[2]])
@@ -893,26 +909,26 @@ def cpu_fused_moe_torch(
         expert_out = F.linear(gate_up, w2_buf_t, None)
         # expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs_t[i]=expert_out
-        elapsed_ms = (time.time() - start) * 1000
+        # elapsed_ms = (time.time() - start) * 1000
  
-        print(f"[DEBUG1] 先行计算专家{rank}-{i} {elapsed_ms:.2f} ms")
+        # print(f"[DEBUG1] 先行计算专家{rank}-{i} {elapsed_ms:.2f} ms")
     # ============================================================
     
     # ==========根据专家激活token数排序计算顺序==============
     for i, num_tokens in manager.layer_expert_info_sorted[rank]:
         if num_tokens == 0 or i in pre_comp:
             continue
-        print("即将计算",i)
+        # print("即将计算",i)
         while manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
-            print("wait..")
+            # print("wait..")
             time.sleep(0.01)
-        start=time.time()
+        # start=time.time()
         # fast_copy(layer.w2_weight[i], w2_buf[i])
         # fast_copy(layer.w13_weight[i], w13_buf[i])
         # layer.w2_weight[i]=w2_buf[i]
         # layer.w13_weight[i]=w13_buf[i] 
-        elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] 计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
+        # elapsed_ms = (time.time() - start) * 1000
+        # print(f"[DEBUG1] 计算专家之前{rank}-{i} {elapsed_ms:.2f} ms")
         start=time.time()
         # print("layer.w2_weight[i]",rank,i,layer.w2_weight[i])
         # print("layer.w13_weight[i]",rank,i,layer.w13_weight[i])
@@ -925,8 +941,8 @@ def cpu_fused_moe_torch(
         expert_out = F.linear(gate_up, w2_buf_t, None)
         # expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs_t[i]=expert_out
-        elapsed_ms = (time.time() - start) * 1000
-        print(f"[DEBUG1] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
+        # elapsed_ms = (time.time() - start) * 1000
+        # print(f"[DEBUG1] 计算专家{rank}-{i} {elapsed_ms:.2f} ms")
     # ============================================================
   
         
@@ -939,10 +955,10 @@ def cpu_fused_moe_torch(
         if num_tokens == 0:
             continue
         outputs.append(outputs_t[i])
-    start=time.time()
+    # start=time.time()
     manager.release_current_layer()
-    elapsed_ms = (time.time() - start) * 1000
-    print(f"[manager.release_current_layer() {elapsed_ms:.2f} ms")
+    # elapsed_ms = (time.time() - start) * 1000
+    # print(f"[manager.release_current_layer() {elapsed_ms:.2f} ms")
     manager.layer_expert_info_sorted[rank]=None
     outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
     new_x = torch.empty_like(outs)

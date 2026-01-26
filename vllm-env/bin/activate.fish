@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /sharenvme/usershome/cyl/test/vllm/vllm-env
+set -gx VIRTUAL_ENV /mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH
