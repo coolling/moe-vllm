@@ -300,7 +300,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.block_sparse_moe(hidden_states)
         # print("moe cmp end")
         elapsed_ms = (time.time() - start) * 1000
-        print(f"cmp {elapsed_ms:.2f} ms")
+        print(f"cmp1 {elapsed_ms:.2f} ms")
         return hidden_states, residual
 
 

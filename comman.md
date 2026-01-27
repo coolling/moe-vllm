@@ -35,7 +35,5 @@ rm -rf *.egg-info/
 rm -f CMakeCache.txt
 rm -rf cmake-build-*/
 
-# 3. 清理 Python 构建文件
-find . -name "*.so" -type f -delete
-find . -name "*.pyc" -type f -delete
-find . -name "__pycache__" -type d -exec rm -rf {} +
+# 注意修改适配
+self.topk=2 缓存的每层专家数、预测的下层专家加载顺序时算法输出的专家数
