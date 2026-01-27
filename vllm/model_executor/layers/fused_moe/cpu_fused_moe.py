@@ -284,7 +284,10 @@ class ExpertWeightManager:
             # coolling todo
             key=(rank-2, self.tuples[rank-2], rank-1, self.tuples[rank-1])
             # print(key)
-            re.extend(self.analyzer_route.get_route_distribution(key))
+            route_distribution=self.analyzer_route.get_route_distribution(key)
+            for eid in route_distribution:
+                if eid not in re:
+                    re.append(eid)
         rank_distribution=self.analyzer.get_rank_distribution(rank)
         if rank_distribution:
             for exp_info in rank_distribution['distribution']:
@@ -403,10 +406,9 @@ class ExpertWeightManager:
                                 self.set_load_state(target_layer_id,i,1)
                             else:
                                 self._load_expert_into_buffer(target_layer_id, i, w13_buf, w2_buf)
-                            # print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
+                            print("有序加载了",target_layer_id,i,"len(queue)",len(self.queue))
                         break
                     # 未知激活结果
-                    self.set_load_state(target_layer_id,eid,0)
                     if eid in self.cache_expert_id[target_layer_id]:                
                         w13_buf[eid]=self.cache_buffer_w13[target_layer_id][eid]
                         w2_buf[eid]=self.cache_buffer_w2[target_layer_id][eid]
@@ -414,7 +416,7 @@ class ExpertWeightManager:
                     else:
                         self._load_expert_into_buffer(target_layer_id, eid, w13_buf, w2_buf)
                     
-                    # print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
+                    print("加载了",target_layer_id,eid,"len(queue)",len(self.queue))
                     
                 # print(w13_buf,w2_buf)
             except Exception as e:
@@ -937,7 +939,7 @@ def cpu_fused_moe_torch(
     for i, num_tokens in enumerate(tokens_per_expert):
         if num_tokens == 0 or manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             continue
-        # print("已经加载完成的专家",rank,i,"先计算")
+        print("已经加载完成的专家",rank,i,"先计算")
         
         pre_comp.append(i)
         
@@ -972,7 +974,7 @@ def cpu_fused_moe_torch(
             if num_tokens == 0 and manager._EXPERT_WEIGHT_LOADED[rank][i]==1:
                 print("白加载了..",rank,i)
             continue
-        # print("即将计算",rank,i)
+        print("即将计算",rank,i)
         while manager._EXPERT_WEIGHT_LOADED[rank][i]!=1:
             # print("wait..")
             time.sleep(0.01)
