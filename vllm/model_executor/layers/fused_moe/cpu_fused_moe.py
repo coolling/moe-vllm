@@ -19,6 +19,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.model_executor.model_loader.default_loader import GLOBAL_HF_WEIGHTS_FILE
 from vllm.model_executor.model_loader.weight_utils import load_expert_weight,load_expert_weight_safeopen,load_expert_weight_par
 import multiprocessing
+import gc
 _CPU_MOE_LAYER_CACHE = {}
 _CPU_MOE_ACT = {
     "silu": SiluAndMul(),
@@ -470,10 +471,11 @@ class ExpertWeightManager:
                 self.cache_buffer_w13[layer_id][expert_id]=w13_buf[expert_id]
                 self.cache_buffer_w2[layer_id][expert_id]=w2_buf[expert_id]
                 start=time.time()
+                gc.disable()
                 self.cache_buffer_w13[layer_id][eid]=None
                 self.cache_buffer_w2[layer_id][eid]=None
                 elapsed_ms = (time.time() - start) * 1000
-                print(f"set none {elapsed_ms:.2f} ms")
+                # print(f"set none1 {elapsed_ms:.2f} ms")
                 break
             
     def release_current_layer(self):
@@ -486,14 +488,16 @@ class ExpertWeightManager:
                     if self._EXPERT_WEIGHT_LOADED[layer_id][i]==1:
                         self.check_expert_to_delete(layer_id,i,w2_buf, w13_buf)
                     # self.set_load_state(layer_id,i,0)
-                    start=time.time()
-                    w2_buf[i]=None
-                    w13_buf[i]=None
-                    elapsed_ms = (time.time() - start) * 1000
-                    print(f"set none {elapsed_ms:.2f} ms")
+                start=time.time()
+                # gc.disable()
+                # w2_buf[:] = [None] * len(w2_buf)
+                # w13_buf[:] = [None] * len(w13_buf)
+                elapsed_ms = (time.time() - start) * 1000
+                # print(f"set none1 {elapsed_ms:.2f} ms")
                 self.buffer_pool.append((w2_buf, w13_buf))
                 self.not_full.notify()  
-
+        gc.enable()   # 启用GC
+        gc.collect()  # 手动触发一次GC，立即回收资源
     def shutdown(self):
         """优雅关闭"""
         self._shutdown.set()
