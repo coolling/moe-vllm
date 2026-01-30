@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/python
+#!/sharenvme/usershome/cyl/test/moe-vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'pybase64==1.4.3','console_scripts','pybase64'
 import re
 import sys

@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/python
+#!/sharenvme/usershome/cyl/test/moe-vllm/vllm-env/bin/python
 # EASY-INSTALL-ENTRY-SCRIPT: 'transformers==4.57.6','console_scripts','transformers-cli'
 import re
 import sys

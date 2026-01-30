@@ -8,7 +8,7 @@ export VLLM_CPU_OMP_THREADS_BIND=20-31
 
 python -m vllm.entrypoints.openai.api_server --model /mnt/nvme0/home/chenyunling/models/Isotonic/smol_llama-4x220M-MoE --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
 vllm serve --model /mnt/nvme0/home/chenyunling/models/Qwen/Qwen1.5-MoE-A2.7B-Chat --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
-vllm serve --model /mnt/nvme0/home/chenyunling/models/mistralai/Mixtral-8x7B-Instruct-v0.1 --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
+vllm serve --model /sharenvme/usershome/cyl/test/model/mistralai/Mixtral-8x7B-Instruct-v0.1 --trust-request-chat-template --disable-custom-all-reduce --enforce-eager
 # 客户端
 python chat.py
 
@@ -24,7 +24,7 @@ source vllm-env/bin/activate
 pip install --upgrade pip
 pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
-cp  /mnt/nvme0/home/chenyunling/test/moe-vllm/safetensors_reader.cpython-310-x86_64-linux-gnu.so /mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/
+cp  ./safetensors_reader.cpython-310-x86_64-linux-gnu.so ./vllm-env/bin/
 
 
 

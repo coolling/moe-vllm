@@ -1,4 +1,4 @@
-#!/mnt/nvme0/home/chenyunling/test/moe-vllm/vllm-env/bin/python3.10
+#!/sharenvme/usershome/cyl/test/moe-vllm/vllm-env/bin/python3.10
 import sys
 from cmake import cpack
 if __name__ == '__main__':

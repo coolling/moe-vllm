@@ -461,14 +461,19 @@ class ExpertWeightManager:
     def check_expert_to_delete(self,layer_id,expert_id,w2_buf, w13_buf):
         if expert_id in self.cache_expert_id[layer_id]:
             return
+        if torch.is_tensor(w13_buf[expert_id]):
+            return
         for i in range(self.topk):
             eid=self.cache_expert_id[layer_id][i]
             if self.layer_expert_in_request[layer_id][eid]<self.layer_expert_in_request[layer_id][expert_id]:
                 self.cache_expert_id[layer_id][i]=expert_id
                 self.cache_buffer_w13[layer_id][expert_id]=w13_buf[expert_id]
                 self.cache_buffer_w2[layer_id][expert_id]=w2_buf[expert_id]
+                start=time.time()
                 self.cache_buffer_w13[layer_id][eid]=None
                 self.cache_buffer_w2[layer_id][eid]=None
+                elapsed_ms = (time.time() - start) * 1000
+                print(f"set none {elapsed_ms:.2f} ms")
                 break
             
     def release_current_layer(self):
@@ -481,8 +486,11 @@ class ExpertWeightManager:
                     if self._EXPERT_WEIGHT_LOADED[layer_id][i]==1:
                         self.check_expert_to_delete(layer_id,i,w2_buf, w13_buf)
                     # self.set_load_state(layer_id,i,0)
+                    start=time.time()
                     w2_buf[i]=None
                     w13_buf[i]=None
+                    elapsed_ms = (time.time() - start) * 1000
+                    print(f"set none {elapsed_ms:.2f} ms")
                 self.buffer_pool.append((w2_buf, w13_buf))
                 self.not_full.notify()  
 
@@ -942,7 +950,7 @@ def cpu_fused_moe_torch(
             tuple_now.append(i)
             if topk_weights.shape[0]==1:
                 bi=max_weight/topk_weights_for_all[i]
-                if bi>=3:
+                if bi>=3 and i not in manager.cache_expert_id[rank]:
                     manager.set_load_state(rank,i,1)
                     w2_buf[i]=torch.empty_like(manager.global_w2_tensor[i])
                     w13_buf[i]=torch.empty_like(manager.global_w13_tensor[i])

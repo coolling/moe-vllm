@@ -18,7 +18,7 @@ os.environ['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 # === 请求参数 ===
 url = "http://localhost:8000/v1/chat/completions"
 payload = {
-    "model": "/mnt/nvme0/home/chenyunling/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "model": "/sharenvme/usershome/cyl/test/model/mistralai/Mixtral-8x7B-Instruct-v0.1",
     "messages": [{"role": "user", "content": "hello"}],
     "max_tokens": 20,
     "temperature": 0,
