@@ -31,7 +31,7 @@ from itertools import islice
 import torch
 from torch import nn
 from transformers import MixtralConfig
-
+import time
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -69,7 +69,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
 
 
 class MixtralMoE(nn.Module):
@@ -149,7 +148,6 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        # print("coolling:",router_logits)
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
@@ -234,7 +232,7 @@ class MixtralAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-import time
+
 class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -276,9 +274,8 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
+        # print("!")
         # Self Attention
-        start=time.time()
-        # print("attention cmp start")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -291,19 +288,13 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        # print("attention cmp end")
-        # elapsed_ms = (time.time() - start) * 1000
-        # print(f"attention cmp {elapsed_ms:.2f} ms")
-        
-        # start=time.time()
-        # print("moe cmp end")
         hidden_states = self.block_sparse_moe(hidden_states)
-        # print("moe cmp end")
-        elapsed_ms = (time.time() - start) * 1000
-        print(f"cmp1 {elapsed_ms:.2f} ms")
         return hidden_states, residual
 
-
+p_t=0
+p_c=0
+d_t=0
+d_c=0
 @support_torch_compile
 class MixtralModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -356,7 +347,13 @@ class MixtralModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        # start =time.time()
+        global p_t
+        global p_c
+        global d_t
+        global d_c
+        # print(input_ids)
+        start =time.time()
+        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -374,8 +371,19 @@ class MixtralModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        # elapsed_ms = (time.time() - start) * 1000
-        # print(f"model cmp {elapsed_ms:.2f} ms")
+        elapsed_ms = (time.time() - start) * 1000
+        c= input_ids.flatten().size(0)
+        if c==1 :
+            d_t+=elapsed_ms
+            d_c+=c
+            print(f"decode now:",elapsed_ms,c,elapsed_ms/c)
+            print(f"decode forward avg:",d_t,d_c,d_t/d_c)
+        else:
+            
+            p_t+=elapsed_ms
+            p_c+=c
+            print(f"prefill now:",elapsed_ms,c,elapsed_ms/c)
+            print(f"prefill forward avg:",p_t,p_c,p_t/p_c)
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -595,7 +603,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        # print("coolling:MixtralForCausalLM")
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

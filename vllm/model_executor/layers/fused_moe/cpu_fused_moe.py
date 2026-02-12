@@ -9,6 +9,9 @@ from collections import defaultdict, deque,Counter
 import threading
 import json
 import os
+import signal
+import sys
+import random
 import numpy as np
 from typing import Dict, List, Any, Optional
 from vllm import _custom_ops as ops
@@ -192,7 +195,9 @@ class ExpertWeightManager:
         self.max_size=max_size
         self.is_init=False
         self.weight_file = GLOBAL_HF_WEIGHTS_FILE
-        self.topk=2
+        self.topk=2 #预测几个
+        self.load_experts=1 #每层缓存几个专家
+        print("start1",self.topk)
         # ========================= 创建热门专家分析器 ========================
         rank_experts_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/rank_experts_distribution.json"
         if not os.path.exists(rank_experts_file):
@@ -203,7 +208,7 @@ class ExpertWeightManager:
         # =================================================================
         
         # ========================= 创建route分析器 ========================
-        route_experts_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/route_experts_distribution.json"
+        route_experts_file = os.path.dirname(GLOBAL_HF_WEIGHTS_FILE[0] )+"/route_experts_distribution-3.json"
         if not os.path.exists(route_experts_file):
             print(f"文件 {route_experts_file} 不存在")
         
@@ -276,13 +281,18 @@ class ExpertWeightManager:
                 break
         # print("predict_next_token_by_request_info,rank:",rank,re)
         return re
-    def predict_experts_order(self,rank):
-        # re=[]
-        re=self.predict_next_token_by_request_info(rank)
-        if rank>=2:
-            # coolling todo
-            key=(rank-2, self.tuples[rank-2], rank-1, self.tuples[rank-1])
-            # print(key)
+    def predict_experts_order(self,rank,t=3):
+        re=[]
+        if rank >= t:
+            # 动态构建 key：包含前 t 层的 (layer_index, experts_tuple)
+            # 结果类似于: (rank-t, self.tuples[rank-t], ..., rank-1, self.tuples[rank-1])
+            key_list = []
+            for i in range(rank - t, rank):
+                key_list.append(i)
+                key_list.append(self.tuples[i])
+            
+            key = tuple(key_list)
+            # key=(rank-2, self.tuples[rank-2], rank-1, self.tuples[rank-1])
             route_distribution=self.analyzer_route.get_route_distribution(key)
             for eid in route_distribution:
                 if eid not in re:
@@ -293,6 +303,8 @@ class ExpertWeightManager:
                 if exp_info['expert'] not in re:
                     re.append(exp_info['expert'])
             # print(re)
+        # for i in range(self.num_experts):
+        #     re.append(random.randint(0, 7))
         for i in range(self.num_experts):
             if i not in re:
                 re.append(i)
@@ -309,14 +321,14 @@ class ExpertWeightManager:
         if rank_distribution:
             for exp_info in rank_distribution['distribution']:
                 re.append(exp_info['expert'])
-                if len(re)>=self.topk:
+                if len(re)>=self.load_experts:
                     break
         #否则按顺序加载
-        if len(re)<self.topk:
+        if len(re)<self.load_experts:
             for i in range(self.num_experts):
                 if i not in re:
                     re.append(i)
-                    if len(re)>=self.topk:
+                    if len(re)>=self.load_experts:
                         break
         self.cache_buffer_w2[layer_id]=[None]*self.num_experts
         self.cache_buffer_w13[layer_id]=[None]*self.num_experts
@@ -339,6 +351,49 @@ class ExpertWeightManager:
                 if data[0]==target_layer_id:
                     return False
         return True
+    def _terminate_thread(self, thread: threading.Thread):
+        """强制终止线程（底层操作，需谨慎）"""
+        if not thread.is_alive():
+            return
+        exc = ctypes.py_object(SystemExit)
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(thread.ident), exc
+        )
+        if res > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(thread.ident, None)
+            raise SystemError("线程终止失败")
+    def _check_interrupt_loop(self, layer_id: int, expert_id: int):
+        """后台检查线程：每秒检查100次中断标记（实时监测）"""
+        while self.loading_thread and self.loading_thread.is_alive():
+            if self._EXPERT_WEIGHT_LOADED[layer_id][expert_id] in [1, -1]:
+                self.interrupt_flag = True
+                print(f"[Layer {layer_id} Expert {expert_id}] 检测到中断，终止加载线程")
+                # 强制终止加载线程（慎用，仅紧急情况）
+                if self.loading_thread.is_alive():
+                    self._terminate_thread(self.loading_thread)
+                break
+            time.sleep(0.01)  # 10ms检查一次，接近实时
+    def load_expert_into_buffer(self, layer_id: int, expert_id: int, w13_buf, w2_buf):
+        
+        self.loading_thread = threading.Thread(
+            target=self._load_expert_into_buffer,
+            args=(layer_id, expert_id, w13_buf, w2_buf)
+        )
+        self.loading_thread.start()
+        # 4. 启动后台实时检查线程
+        self.check_thread = threading.Thread(
+            target=self._check_interrupt_loop,
+            args=(layer_id, expert_id)
+        )
+        self.check_thread.start()
+        
+        self.loading_thread.join()
+        self.check_thread.join()
+
+        # 6. 重置标记
+        self.interrupt_flag = False
+        self.loading_thread = None
+        self.check_thread = None
     def _load_expert_into_buffer(self, layer_id: int, expert_id: int, w13_buf, w2_buf):
         import time
         
@@ -464,7 +519,7 @@ class ExpertWeightManager:
             return
         if torch.is_tensor(w13_buf[expert_id]):
             return
-        for i in range(self.topk):
+        for i in range(self.load_experts):
             eid=self.cache_expert_id[layer_id][i]
             if self.layer_expert_in_request[layer_id][eid]<self.layer_expert_in_request[layer_id][expert_id]:
                 self.cache_expert_id[layer_id][i]=expert_id
@@ -906,6 +961,8 @@ def cpu_fused_moe_torch(
     
     # print("====================================\n")
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
+    if topk_weights.shape[0]!=1:
+        manager.layer_expert_in_request = defaultdict(Counter)
     # print(layer.w13_weight)
     #====================找出最大的专家权重==================
     # print(topk_weights.shape)
@@ -952,13 +1009,13 @@ def cpu_fused_moe_torch(
             manager.set_load_state(rank,i,-1)
         else:
             tuple_now.append(i)
-            if topk_weights.shape[0]==1:
-                bi=max_weight/topk_weights_for_all[i]
-                if bi>=3 and i not in manager.cache_expert_id[rank]:
-                    manager.set_load_state(rank,i,1)
-                    w2_buf[i]=torch.empty_like(manager.global_w2_tensor[i])
-                    w13_buf[i]=torch.empty_like(manager.global_w13_tensor[i])
-                    print("倍数:",bi,"大于等于3")
+            # if topk_weights.shape[0]==1:
+            #     bi=max_weight/topk_weights_for_all[i]
+            #     if bi>=3 and i not in manager.cache_expert_id[rank]:
+            #         manager.set_load_state(rank,i,1)
+            #         w2_buf[i]=torch.empty_like(manager.global_w2_tensor[i])
+            #         w13_buf[i]=torch.empty_like(manager.global_w13_tensor[i])
+            #         print("倍数:",bi,"大于等于3")
     # ===================================================
     manager.add_route(rank,tuple(tuple_now)) #记录该层激活专家
     

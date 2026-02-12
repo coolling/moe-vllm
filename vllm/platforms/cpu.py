@@ -277,7 +277,8 @@ class CpuPlatform(Platform):
         # Note: to avoid the error 'nthreads cannot be larger than environment
         # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
-
+        import torch
+        torch.set_num_threads(12)
         if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
             # Set default threads num for OpenMP parallel
             os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
